@@ -11,11 +11,19 @@ A browser-based digital forensics tool that extracts hidden metadata from files 
 Every file you create or photograph carries invisible "metadata" baked in by your device or software. This tool exposes it:
 
 | File Type | What it reveals |
-|-----------|----------------|
-| 📸 **JPEG / TIFF** | GPS coordinates, camera make/model, software version, timestamps, ISO/aperture |
-| 📕 **PDF** | Author name, creating application, creation/modification dates, keywords |
-| 📘 **DOCX (Word)** | Author name, last editor, revision count, Office version, timestamps |
-| 🎵 **MP3 / WAV** | Artist, encoder software, file owner, embedded URLs |
+| --- | --- |
+| 📸 **JPEG / TIFF / PNG** | GPS coordinates, camera make/model, software version, timestamps, EXIF/XMP/IPTC data
+
+ |
+| 📕 **PDF** | Author name, creating application, creation/modification dates, keywords, embedded attachments
+
+ |
+| 📘 **DOCX / DOC (Word)** | Author name, last editor, revision count, track changes, comment authors, editing history
+
+ |
+| 🎵 **MP3 / WAV / MP4 / FLAC** | Artist, encoder software, file owner, duration, sample rates, recording dates, embedded pictures
+
+ |
 
 ---
 
@@ -23,34 +31,54 @@ Every file you create or photograph carries invisible "metadata" baked in by you
 
 This is a real-world OSINT (Open Source Intelligence) and digital forensics technique:
 
-- **GPS in photos** → a journalist publishes a photo with location data embedded → their home address is now public
-- **Author in PDFs** → a company leaks a confidential document → the metadata reveals the employee who wrote it
-- **Software version in DOCX** → an attacker cross-references the Office version with known CVEs → finds an exploit path
-- **Device fingerprinting** → multiple "anonymous" photos are linked back to the same camera/phone
+* **GPS in photos** → a journalist publishes a photo with location data embedded → their home address is now public.
 
-Real tools like [ExifTool](https://exiftool.org) and `python-docx` do this at a deeper level — this project gives you the same concepts in a single HTML file you can understand line by line.
+
+* **Author in PDFs** → a company leaks a confidential document → the metadata reveals the employee who wrote it.
+
+
+* **Editing history in DOCX** → an attacker reviews tracked changes and comments → finds sensitive internal discussions and author identities.
+
+
+* **Device fingerprinting** → multiple "anonymous" photos are linked back to the same camera/phone.
+
+
+
+Real tools like [ExifTool](https://exiftool.org) do this at a deeper level — this project gives you the same concepts in a single HTML file you can understand line by line.
 
 ---
 
 ## How to run it
 
 **Option 1 — Just open the file**
+
 ```
 Download index.html → double-click it → opens in your browser
+
 ```
 
 **Option 2 — Serve it locally (recommended)**
+
 ```bash
 # Python 3
 python3 -m http.server 8000
 # then open http://localhost:8000
+
 ```
 
 **Option 3 — Deploy to GitHub Pages (free, shareable)**
+
 1. Fork this repo
+
+
 2. Go to Settings → Pages
+
+
 3. Set source to `main` branch, root folder
-4. Your tool is now live at `https://yourusername.github.io/metadata-forensics-tool`
+
+
+4. Your tool is now live at `[https://yourusername.github.io/metadata-forensics-tool](https://yourusername.github.io/metadata-forensics-tool)`
+
 
 ---
 
@@ -58,47 +86,45 @@ python3 -m http.server 8000
 
 ```
 metadata-forensics-tool/
-└── index.html      ← The entire tool. One file. ~400 lines.
+└── index.html      ← The entire tool. One file.
+
 ```
 
-Everything is vanilla JavaScript — no frameworks, no build step, no npm.
+Everything is vanilla JavaScript, HTML, and CSS — no frameworks, no build step, no npm. Complex parser libraries are loaded dynamically via CDN.
 
 ---
 
 ## How it works (technical breakdown)
 
-### JPEG/TIFF — EXIF extraction
-Uses the [exif-js](https://github.com/exif-js/exif-js) library to read the EXIF IFD (Image File Directory) embedded in JPEG files. EXIF data is stored in a standardized binary format (TIFF structure) in the image header.
+### JPEG/TIFF/PNG — ExifReader engine
 
-### PDF — Binary header parsing
-Reads the raw file bytes and searches for standard PDF info dictionary keys (`/Author`, `/Creator`, `/Producer`, `/CreationDate`, etc.) using regular expressions on the binary stream.
+Uses the `ExifReader` library via CDN to read the EXIF, XMP, and IPTC blocks embedded in image files. It automatically extracts tags and calculates GPS rational coordinates into decimal values.
 
-### DOCX — OOXML ZIP parsing
-DOCX files are ZIP archives containing XML files. The tool scans the raw bytes for `docProps/core.xml` content, which stores `<dc:creator>`, `<cp:lastModifiedBy>`, and revision metadata as plain XML tags.
+### PDF — PDF.js Document engine
 
-### Audio — ID3 tag extraction
-MP3 files begin with an `ID3` header containing tag frames (TIT2 = title, TPE1 = artist, TENC = encoder, etc.). The tool reads the first 6KB of the file and extracts printable ASCII content from known frame offsets.
+Loads the official `pdf.js` library via CDN to parse the document catalog, info blocks, and metadata streams. It features a custom fallback parser that scans raw file bytes for standard PDF info dictionary keys (`/Author`, `/Creator`, `/CreationDate`) and XMP packets if the main engine fails.
+
+### DOCX / DOC — OOXML and Legacy CFB parsing
+
+Modern DOCX files are parsed using the `JSZip` CDN library to decompress the archive and read `docProps/core.xml`, `app.xml`, and `custom.xml`. The tool also scans review data for tracked changes and comment authors. Legacy `.doc` files are handled by a custom-built OLE Compound File (CFB) property-set parser reading binary streams.
+
+### Media — Binary Audio/Video tag engine
+
+A custom vanilla JS binary parser reads file `ArrayBuffers` to extract ID3v1/ID3v2 tags from MP3s, RIFF/INFO/BWF chunks from WAVs, QuickTime atoms (`moov`, `trak`, `udta`) from MP4/M4As, and Vorbis comments from FLAC/OGG files.
 
 ---
 
 ## Limitations
 
 | Limitation | Better tool |
-|------------|-------------|
-| PNG text chunks | `exiftool filename.png` |
-| Old .doc binary format | `python-docx` or LibreOffice |
-| XMP metadata in PDFs | `exiftool -xmp filename.pdf` |
-| Deep forensic analysis | [Autopsy](https://www.autopsy.com), [ExifTool](https://exiftool.org) |
+| --- | --- |
+| Deep memory analysis of multi-gigabyte files | CLI tools (browser memory limits)
 
----
+ |
+| Offline execution (requires internet for CDNs) | Standard local npm installations
 
-## Resources to go deeper
-
-- [ExifTool documentation](https://exiftool.org) — the gold standard CLI tool
-- [EXIF spec](https://www.exif.org/Exif2-2.PDF) — the actual standard
-- [OOXML file format](https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-docx) — how Word documents are structured
-- [ID3 tag spec](https://id3.org/id3v2.3.0) — MP3 metadata standard
-- [OWASP Metadata Leakage](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/01-Information_Gathering/02-Fingerprint_Web_Server) — how this is used in real pentests
+ |
+| Deep forensic system analysis | [Autopsy](https://www.google.com/search?q=https%3A%2F%2Fwww.autopsy.com), [ExifTool](https://exiftool.org)<br> |
 
 ---
 
