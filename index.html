@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Metadata Forensics Tool</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exif-js/2.3.0/exif.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3347;
+    --text: #e8eaf0;
+    --muted: #7b8099;
+    --hint: #454a60;
+    --green: #4ade80;
+    --yellow: #facc15;
+    --red: #f87171;
+    --blue: #60a5fa;
+    --orange: #fb923c;
+    --mono: 'Courier New', 'Lucida Console', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --radius: 8px;
+    --radius-lg: 12px;
+  }
+
+  body {
+    font-family: var(--mono);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 2rem 1rem;
+  }
+
+  .page-wrap {
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  header {
+    margin-bottom: 2.5rem;
+  }
+
+  .header-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-family: var(--sans);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    background: rgba(74, 222, 128, 0.12);
+    color: var(--green);
+    padding: 4px 10px;
+    border-radius: 99px;
+    border: 1px solid rgba(74, 222, 128, 0.25);
+    margin-bottom: 1rem;
+  }
+
+  .header-badge::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  h1 {
+    font-family: var(--sans);
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 0.4rem;
+    letter-spacing: -0.02em;
+  }
+
+  h1 span {
+    color: var(--green);
+  }
+
+  .subtitle {
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--muted);
+  }
+
+  /* Drop Zone */
+  #drop-zone {
+    border: 1.5px dashed var(--border);
+    border-radius: var(--radius-lg);
+    padding: 3.5rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    background: var(--surface);
+    margin-bottom: 1.5rem;
+    position: relative;
+  }
+
+  #drop-zone:hover, #drop-zone.drag-over {
+    background: var(--surface2);
+    border-color: var(--green);
+  }
+
+  #drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+
+  .drop-icon {
+    font-size: 42px;
+    margin-bottom: 1rem;
+    display: block;
+    filter: grayscale(1) brightness(0.6);
+  }
+
+  .drop-title {
+    font-family: var(--sans);
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 0.4rem;
+  }
+
+  .drop-sub {
+    font-family: var(--sans);
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .drop-types {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 1rem;
+  }
+
+  .type-pill {
+    font-size: 11px;
+    font-family: var(--sans);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 3px 8px;
+    border-radius: 99px;
+  }
+
+  /* Results */
+  #results { display: none; }
+
+  .terminal-wrap {
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+  }
+
+  .terminal-header {
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot-r { background: #f87171; }
+  .dot-y { background: #facc15; }
+  .dot-g { background: #4ade80; }
+
+  .terminal-title {
+    font-size: 12px;
+    color: var(--muted);
+    margin-left: 6px;
+    letter-spacing: 0.04em;
+  }
+
+  .terminal-body {
+    background: #0a0c12;
+    padding: 1rem 1.25rem;
+    min-height: 80px;
+  }
+
+  .log-line {
+    font-size: 12px;
+    line-height: 1.9;
+    font-family: var(--mono);
+  }
+
+  .log-line .prompt { color: var(--green); }
+  .log-line .val { color: var(--text); }
+  .log-line .dim { color: var(--hint); }
+  .log-line .warn { color: var(--yellow); }
+
+  /* File info bar */
+  .file-info-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0.85rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 1rem;
+    font-size: 13px;
+  }
+
+  .file-name {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+  }
+
+  .file-meta {
+    font-family: var(--sans);
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .thumb-wrap {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius);
+    overflow: hidden;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+  }
+
+  .thumb-wrap img { width: 100%; height: 100%; object-fit: cover; }
+
+  /* Risk badge */
+  .risk-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-family: var(--sans);
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 99px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border: 1px solid;
+  }
+
+  .risk-high { background: rgba(248, 113, 113, 0.12); color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
+  .risk-med  { background: rgba(250, 204, 21, 0.10); color: #facc15; border-color: rgba(250, 204, 21, 0.3); }
+  .risk-low  { background: rgba(74, 222, 128, 0.10); color: #4ade80; border-color: rgba(74, 222, 128, 0.3); }
+
+  /* Alert boxes */
+  .alert-box {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-family: var(--sans);
+    line-height: 1.5;
+    margin-bottom: 0.6rem;
+    border: 1px solid;
+  }
+
+  .alert-danger  { background: rgba(248,113,113,0.08); border-color: rgba(248,113,113,0.25); color: #fca5a5; }
+  .alert-warn    { background: rgba(250,204,21,0.08);  border-color: rgba(250,204,21,0.25);  color: #fde68a; }
+  .alert-info    { background: rgba(96,165,250,0.08);  border-color: rgba(96,165,250,0.25);  color: #93c5fd; }
+  .alert-success { background: rgba(74,222,128,0.08);  border-color: rgba(74,222,128,0.25);  color: #86efac; }
+
+  .alert-icon { font-size: 16px; margin-top: 1px; flex-shrink: 0; }
+
+  /* Section label */
+  .section-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--hint);
+    margin: 1.25rem 0 0.6rem;
+    font-family: var(--sans);
+  }
+
+  /* Tag grid */
+  .tag-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 8px;
+    margin-bottom: 0.5rem;
+  }
+
+  .tag-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.65rem 0.85rem;
+    overflow: hidden;
+  }
+
+  .tag-card:hover {
+    border-color: #3a4060;
+  }
+
+  .tag-key {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--hint);
+    font-family: var(--sans);
+    margin-bottom: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tag-val {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    word-break: break-all;
+    font-family: var(--mono);
+  }
+
+  .tag-val.highlight {
+    color: var(--orange);
+  }
+
+  /* GPS map link */
+  #map-link {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0.85rem 1rem;
+    background: rgba(248,113,113,0.07);
+    border: 1px solid rgba(248,113,113,0.25);
+    border-radius: var(--radius);
+    font-family: var(--sans);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+    text-decoration: none;
+    color: var(--text);
+    margin-top: 0.5rem;
+  }
+
+  #map-link:hover { background: rgba(248,113,113,0.13); }
+
+  .gps-coords {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .map-arrow { margin-left: auto; color: var(--hint); font-size: 14px; }
+
+  /* Buttons */
+  .btn-row { margin-top: 1.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0.5rem 1rem;
+    font-size: 13px;
+    font-family: var(--sans);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 1px solid;
+  }
+
+  .btn-primary {
+    background: rgba(74, 222, 128, 0.1);
+    border-color: rgba(74, 222, 128, 0.35);
+    color: var(--green);
+  }
+  .btn-primary:hover { background: rgba(74, 222, 128, 0.18); }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: var(--border);
+    color: var(--muted);
+  }
+  .btn-ghost:hover { background: var(--surface); color: var(--text); }
+
+  .no-data {
+    font-family: var(--sans);
+    font-size: 14px;
+    color: var(--hint);
+    text-align: center;
+    padding: 2rem;
+  }
+
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--hint);
+    font-family: var(--sans);
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  footer a { color: var(--muted); text-decoration: none; }
+  footer a:hover { color: var(--text); }
+
+  @media (max-width: 500px) {
+    h1 { font-size: 22px; }
+    .tag-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page-wrap">
+
+  <header>
+    <div class="header-badge">Security Tool · v1.0</div>
+    <h1>Metadata <span>Forensics</span></h1>
+    <p class="subtitle">Expose hidden data inside images, PDFs, Word docs, and audio files — no upload, runs entirely in your browser.</p>
+  </header>
+
+  <!-- Drop Zone -->
+  <div id="drop-zone" role="button" aria-label="Upload a file to analyze its metadata">
+    <input type="file" id="file-input" accept="image/*,.pdf,.docx,.doc,.mp3,.mp4,.wav" aria-label="Choose file">
+    <span class="drop-icon">🔍</span>
+    <div class="drop-title">Drop any file here to inspect its metadata</div>
+    <div class="drop-sub">Files never leave your device — all analysis runs locally.</div>
+    <div class="drop-types">
+      <span class="type-pill">JPEG / TIFF</span>
+      <span class="type-pill">PNG</span>
+      <span class="type-pill">PDF</span>
+      <span class="type-pill">DOCX</span>
+      <span class="type-pill">MP3 / WAV</span>
+    </div>
+  </div>
+
+  <!-- Results Panel -->
+  <div id="results">
+
+    <div class="terminal-wrap">
+      <div class="terminal-header">
+        <span class="dot dot-r"></span>
+        <span class="dot dot-y"></span>
+        <span class="dot dot-g"></span>
+        <span class="terminal-title" id="terminal-title">metascan.log</span>
+      </div>
+      <div class="terminal-body" id="log-output"></div>
+    </div>
+
+    <div class="file-info-bar">
+      <div class="thumb-wrap" id="thumb-wrap">📄</div>
+      <div style="flex:1; min-width:0;">
+        <div class="file-name" id="fname">—</div>
+        <div class="file-meta" id="fmeta">—</div>
+      </div>
+      <div id="risk-wrap"></div>
+    </div>
+
+    <div id="alerts-zone"></div>
+    <div id="findings-zone"></div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="exportReport()">⬇ Export report (.txt)</button>
+      <button class="btn btn-ghost" onclick="resetTool()">↺ Analyze another file</button>
+    </div>
+
+  </div>
+
+  <footer>
+    <span>Metadata Forensics Tool — open source, runs entirely in-browser</span>
+    <span>No data is sent to any server. Ever.</span>
+  </footer>
+
+</div>
+
+<script>
+  var globalFindings = {};
+  var globalFile = null;
+
+  function fmtSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return Math.round(b / 1024) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // Drag & drop
+  var dropZone = document.getElementById('drop-zone');
+  var fileInput = document.getElementById('file-input');
+  dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('drag-over'); });
+  dropZone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    var f = e.dataTransfer.files[0];
+    if (f) processFile(f);
+  });
+  fileInput.addEventListener('change', function() {
+    if (fileInput.files[0]) processFile(fileInput.files[0]);
+  });
+
+  function processFile(file) {
+    globalFile = file;
+    globalFindings = {};
+    document.getElementById('drop-zone').style.display = 'none';
+    document.getElementById('results').style.display = 'block';
+    document.getElementById('terminal-title').textContent = 'scanning: ' + file.name;
+
+    var log = document.getElementById('log-output');
+    log.innerHTML = '';
+
+    var lines = [
+      { cls: 'prompt', text: '❯ metascan --verbose "' + file.name + '"' },
+      { cls: 'dim',    text: '  Initializing forensic scan engine...' },
+      { cls: 'val',    text: '  File: ' + file.name },
+      { cls: 'val',    text: '  Size: ' + fmtSize(file.size) + '  |  Type: ' + (file.type || 'unknown') },
+      { cls: 'dim',    text: '  Extracting metadata layers...' },
+    ];
+
+    var i = 0;
+    var timer = setInterval(function() {
+      if (i >= lines.length) { clearInterval(timer); return; }
+      var l = lines[i++];
+      var d = document.createElement('div');
+      d.className = 'log-line';
+      d.innerHTML = '<span class="' + l.cls + '">' + esc(l.text) + '</span>';
+      log.appendChild(d);
+    }, 150);
+
+    document.getElementById('fname').textContent = file.name;
+    document.getElementById('fmeta').textContent =
+      fmtSize(file.size) + ' · ' + (file.type || 'unknown type') + ' · Modified: ' + new Date(file.lastModified).toLocaleString();
+
+    globalFindings['File Name']     = file.name;
+    globalFindings['File Size']     = fmtSize(file.size);
+    globalFindings['MIME Type']     = file.type || 'unknown';
+    globalFindings['Last Modified'] = new Date(file.lastModified).toLocaleString();
+
+    // Thumbnail
+    var tw = document.getElementById('thumb-wrap');
+    if (file.type && file.type.startsWith('image/')) {
+      var url = URL.createObjectURL(file);
+      tw.innerHTML = '<img src="' + url + '" alt="Thumbnail">';
+    } else if (file.type && file.type.startsWith('audio/')) {
+      tw.textContent = '🎵';
+    } else if (file.name.toLowerCase().endsWith('.pdf')) {
+      tw.textContent = '📕';
+    } else if (file.name.toLowerCase().match(/\.docx?$/)) {
+      tw.textContent = '📘';
+    }
+
+    // Route by type
+    if (file.type && file.type.startsWith('image/')) {
+      if (file.type === 'image/jpeg' || file.type === 'image/tiff') {
+        extractExif(file);
+      } else {
+        extractBasicImage(file);
+      }
+    } else if (file.name.toLowerCase().endsWith('.pdf')) {
+      extractPDF(file);
+    } else if (file.name.toLowerCase().match(/\.docx?$/)) {
+      extractDOCX(file);
+    } else if (file.type && file.type.startsWith('audio/')) {
+      extractAudio(file);
+    } else {
+      setTimeout(function() { renderFindings([], 'low', {}); }, 900);
+    }
+  }
+
+  /* ---- EXIF (JPEG/TIFF) ---- */
+  function extractExif(file) {
+    EXIF.getData(file, function() {
+      var tags = EXIF.getAllTags(this);
+      var findings = {};
+      var alerts = [];
+      var lat = null, lon = null;
+
+      var keyMap = {
+        'Make': 'Camera Make', 'Model': 'Camera Model', 'Software': 'Software',
+        'DateTime': 'Date Taken', 'DateTimeOriginal': 'Original Date',
+        'Artist': 'Artist/Author', 'Copyright': 'Copyright',
+        'ImageDescription': 'Description', 'Flash': 'Flash Used',
+        'FocalLength': 'Focal Length', 'ISOSpeedRatings': 'ISO Speed',
+        'ExposureTime': 'Exposure Time', 'FNumber': 'Aperture (F-Number)',
+        'PixelXDimension': 'Width (px)', 'PixelYDimension': 'Height (px)',
+        'ColorSpace': 'Color Space', 'Orientation': 'Orientation',
+        'XResolution': 'X Resolution', 'YResolution': 'Y Resolution',
+        'GPSLatitude': '_lat', 'GPSLongitude': '_lon',
+        'GPSLatitudeRef': '_latr', 'GPSLongitudeRef': '_lonr',
+        'GPSAltitude': 'GPS Altitude (m)',
+        'ExifIFDPointer': null, 'MakerNote': null, 'UserComment': null,
+      };
+
+      function toDec(arr, ref) {
+        if (!arr || arr.length < 3) return null;
+        var d = arr[0] + arr[1] / 60 + arr[2] / 3600;
+        if (ref === 'S' || ref === 'W') d = -d;
+        return d;
+      }
+
+      for (var k in tags) {
+        if (tags[k] === undefined || tags[k] === null || tags[k] === '') continue;
+        var label = keyMap.hasOwnProperty(k) ? keyMap[k] : k;
+        if (label === null) continue;
+        if (k === 'GPSLatitude')   { lat = toDec(tags[k], tags['GPSLatitudeRef']);  continue; }
+        if (k === 'GPSLongitude')  { lon = toDec(tags[k], tags['GPSLongitudeRef']); continue; }
+        if (k === 'GPSLatitudeRef' || k === 'GPSLongitudeRef') continue;
+        if (label.startsWith('_')) continue;
+        var val = tags[k];
+        if (val && val.numerator !== undefined) val = (val.numerator / val.denominator).toFixed(2);
+        if (Array.isArray(val)) val = val.join(', ');
+        if (String(val).length > 90) val = String(val).substring(0, 90) + '…';
+        findings[label] = String(val);
+      }
+
+      if (lat !== null && lon !== null) {
+        findings['GPS Coordinates'] = lat.toFixed(6) + ', ' + lon.toFixed(6);
+        alerts.push({ type: 'danger', icon: '📍', msg: 'GPS location data found! Coordinates: ' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '. Anyone who receives this image can pinpoint the exact location where it was taken.' });
+      }
+      if (findings['Camera Make'] || findings['Camera Model']) {
+        alerts.push({ type: 'warn', icon: '📱', msg: 'Device fingerprint embedded: ' + (findings['Camera Make'] || '') + ' ' + (findings['Camera Model'] || '') + '. This links multiple photos back to the same physical device.' });
+      }
+      if (findings['Software']) {
+        alerts.push({ type: 'warn', icon: '🔧', msg: 'Software version exposed: ' + findings['Software'] + '. Attackers cross-reference software versions with known CVEs to find unpatched vulnerabilities.' });
+      }
+      if (findings['Artist/Author'] || findings['Copyright']) {
+        alerts.push({ type: 'info', icon: '🪪', msg: 'Identity information found: "' + (findings['Artist/Author'] || findings['Copyright']) + '". Can be used to deanonymize the file creator.' });
+      }
+      if (Object.keys(findings).length < 3 && lat === null) {
+        alerts.push({ type: 'success', icon: '🛡', msg: 'Very little metadata found. This image may already have been stripped of EXIF data, or was created digitally without embedded camera data.' });
+      }
+
+      var risk = lat !== null ? 'high' : (alerts.length > 1 ? 'med' : 'low');
+      addLog('  Found ' + Object.keys(findings).length + ' metadata fields.', 'val');
+      if (lat !== null) addLog('  ⚠  GPS coordinates detected — real-world location exposed!', 'warn');
+      addLog('  Scan complete.', 'dim');
+
+      renderFindings(alerts, risk, findings, lat !== null ? { lat: lat, lon: lon } : null);
+    });
+  }
+
+  /* ---- Basic image (PNG, WebP, GIF) ---- */
+  function extractBasicImage(file) {
+    var img = new Image();
+    var url = URL.createObjectURL(file);
+    img.onload = function() {
+      var findings = {};
+      findings['Dimensions']  = img.naturalWidth + ' × ' + img.naturalHeight + ' px';
+      findings['Megapixels']  = ((img.naturalWidth * img.naturalHeight) / 1000000).toFixed(2) + ' MP';
+      var alerts = [
+        { type: 'info', icon: 'ℹ', msg: 'PNG/WebP/GIF images rarely carry EXIF GPS data. The browser can read basic image dimensions for this format. For deeper analysis of PNG text chunks, use ExifTool on the command line.' }
+      ];
+      addLog('  PNG/WebP detected — EXIF support is limited in-browser.', 'dim');
+      addLog('  Extracted basic image properties.', 'val');
+      addLog('  Scan complete.', 'dim');
+      renderFindings(alerts, 'low', findings);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  }
+
+  /* ---- PDF ---- */
+  function extractPDF(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var bytes = new Uint8Array(e.target.result);
+      var str = '';
+      for (var i = 0; i < Math.min(bytes.length, 10000); i++) str += String.fromCharCode(bytes[i]);
+
+      var findings = {};
+      var alerts = [];
+      var fields = {
+        '/Author': 'Author', '/Creator': 'Creator Application',
+        '/Producer': 'Producer', '/Title': 'Document Title',
+        '/Subject': 'Subject', '/Keywords': 'Keywords',
+        '/CreationDate': 'Creation Date', '/ModDate': 'Modified Date',
+      };
+
+      for (var key in fields) {
+        var re = new RegExp(key.replace('/', '\\/') + '\\s*\\(([^)]{1,120})\\)', 'i');
+        var m = str.match(re);
+        if (m && m[1] && m[1].trim().length > 2) {
+          findings[fields[key]] = m[1].trim().replace(/[^\x20-\x7E]/g, '?');
+        }
+      }
+
+      if (findings['Author'])              alerts.push({ type: 'warn', icon: '🪪', msg: 'Author name embedded: "' + findings['Author'] + '". Sharing this PDF exposes the creator\'s identity even if the document appears anonymous.' });
+      if (findings['Creator Application']) alerts.push({ type: 'warn', icon: '🔧', msg: 'Application version found: ' + findings['Creator Application'] + '. Software fingerprints can reveal unpatched vulnerabilities.' });
+      if (findings['Creation Date'])       alerts.push({ type: 'info', icon: '📅', msg: 'Timestamps present. These reveal when the document was created and last modified, leaking your work schedule.' });
+      if (Object.keys(findings).length === 0) {
+        alerts.push({ type: 'success', icon: '🛡', msg: 'No standard metadata detected in the PDF header. The file may have been sanitized, or metadata is stored in XMP format deeper in the file (use ExifTool for full coverage).' });
+      }
+
+      addLog('  Parsed PDF binary stream (' + fmtSize(file.size) + ').', 'dim');
+      addLog('  Found ' + Object.keys(findings).length + ' metadata fields.', 'val');
+      addLog('  Scan complete.', 'dim');
+      renderFindings(alerts, findings['Author'] ? 'med' : 'low', findings);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  /* ---- DOCX ---- */
+  function extractDOCX(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var bytes = new Uint8Array(e.target.result);
+      var str = '';
+      for (var i = 0; i < Math.min(bytes.length, 14000); i++) str += String.fromCharCode(bytes[i]);
+
+      var findings = {};
+      var alerts = [];
+      var isZip = (bytes[0] === 0x50 && bytes[1] === 0x4B);
+
+      if (isZip) {
+        var xmlFields = [
+          { re: /<dc:creator>([^<]{1,120})<\/dc:creator>/i,              label: 'Author (dc:creator)' },
+          { re: /<cp:lastModifiedBy>([^<]{1,120})<\/cp:lastModifiedBy>/i, label: 'Last Modified By' },
+          { re: /<dc:title>([^<]{1,120})<\/dc:title>/i,                  label: 'Document Title' },
+          { re: /<dc:subject>([^<]{1,120})<\/dc:subject>/i,              label: 'Subject' },
+          { re: /<dc:description>([^<]{1,120})<\/dc:description>/i,      label: 'Description' },
+          { re: /<dcterms:created[^>]*>([^<]{1,80})<\/dcterms:created>/i, label: 'Created Date' },
+          { re: /<dcterms:modified[^>]*>([^<]{1,80})<\/dcterms:modified>/i, label: 'Modified Date' },
+          { re: /<cp:revision>([^<]{1,20})<\/cp:revision>/i,             label: 'Revision Count' },
+          { re: /<cp:keywords>([^<]{1,120})<\/cp:keywords>/i,            label: 'Keywords' },
+          { re: /<Application>([^<]{1,80})<\/Application>/i,             label: 'Authoring Application' },
+          { re: /<AppVersion>([^<]{1,20})<\/AppVersion>/i,               label: 'App Version' },
+        ];
+        xmlFields.forEach(function(f) {
+          var m = str.match(f.re);
+          if (m && m[1] && m[1].trim().length > 0) findings[f.label] = m[1].trim();
+        });
+
+        if (findings['Author (dc:creator)'])  alerts.push({ type: 'danger', icon: '🪪', msg: 'Author identity hardcoded: "' + findings['Author (dc:creator)'] + '". This name is embedded in every .docx you send, even if removed from the visible document text.' });
+        if (findings['Last Modified By'])      alerts.push({ type: 'warn', icon: '✏️', msg: 'Last editor\'s name found: "' + findings['Last Modified By'] + '". Reveals who touched the document most recently.' });
+        if (findings['Revision Count'])        alerts.push({ type: 'info', icon: '🔢', msg: 'This document has been saved ' + findings['Revision Count'] + ' time(s). Can hint at how many people edited it or how long it was worked on.' });
+        if (findings['Authoring Application']) alerts.push({ type: 'warn', icon: '🔧', msg: 'Office version fingerprint: ' + findings['Authoring Application'] + ' ' + (findings['App Version'] || '') + '.' });
+        if (Object.keys(findings).length === 0) {
+          alerts.push({ type: 'success', icon: '🛡', msg: 'No identity or application metadata detected. This document has likely been cleaned before sharing.' });
+        }
+      } else {
+        alerts.push({ type: 'info', icon: 'ℹ', msg: 'Older .doc (binary format) detected. Full parsing requires python-docx or LibreOffice on the command line.' });
+      }
+
+      var risk = findings['Author (dc:creator)'] ? 'high' : (alerts.length > 1 ? 'med' : 'low');
+      addLog('  Parsed OOXML ZIP archive.', 'dim');
+      addLog('  Found ' + Object.keys(findings).length + ' metadata fields.', 'val');
+      addLog('  Scan complete.', 'dim');
+      renderFindings(alerts, risk, findings);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  /* ---- Audio (MP3 / WAV) ---- */
+  function extractAudio(file) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var bytes = new Uint8Array(e.target.result);
+      var str = '';
+      for (var i = 0; i < Math.min(bytes.length, 6000); i++) str += String.fromCharCode(bytes[i]);
+
+      var findings = {};
+      var alerts = [];
+
+      if (str.substring(0, 3) === 'ID3') {
+        var id3Fields = [
+          { prefix: 'TIT2', label: 'Title' }, { prefix: 'TPE1', label: 'Artist' },
+          { prefix: 'TALB', label: 'Album' }, { prefix: 'TYER', label: 'Year' },
+          { prefix: 'TENC', label: 'Encoder Software' }, { prefix: 'TCON', label: 'Genre' },
+          { prefix: 'COMM', label: 'Comment' }, { prefix: 'TCOP', label: 'Copyright' },
+          { prefix: 'TOWN', label: 'File Owner' }, { prefix: 'WXXX', label: 'Embedded URL' },
+        ];
+        id3Fields.forEach(function(f) {
+          var idx = str.indexOf(f.prefix);
+          if (idx !== -1) {
+            var chunk = str.substring(idx + 10, idx + 70).replace(/[^\x20-\x7E]/g, '').trim();
+            if (chunk.length > 1) findings[f.label] = chunk;
+          }
+        });
+        if (findings['Encoder Software']) alerts.push({ type: 'warn', icon: '🔧', msg: 'Encoding software found: ' + findings['Encoder Software'] + '. Identifies the tool used to create the file.' });
+        if (findings['File Owner'])       alerts.push({ type: 'warn', icon: '🪪', msg: 'File owner embedded: "' + findings['File Owner'] + '".' });
+        if (findings['Embedded URL'])     alerts.push({ type: 'info', icon: '🔗', msg: 'A URL is embedded in this audio file: ' + findings['Embedded URL'] });
+      } else {
+        alerts.push({ type: 'info', icon: 'ℹ', msg: 'Non-ID3 audio detected. The browser can read full ID3 tags from MP3 files. WAV and other formats may require ExifTool for complete analysis.' });
+      }
+
+      addLog('  Audio stream parsed.', 'dim');
+      addLog('  Found ' + Object.keys(findings).length + ' ID3 tag fields.', 'val');
+      addLog('  Scan complete.', 'dim');
+      renderFindings(alerts, Object.keys(findings).length > 2 ? 'med' : 'low', findings);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  /* ---- Helpers ---- */
+  function addLog(text, cls) {
+    var log = document.getElementById('log-output');
+    var d = document.createElement('div');
+    d.className = 'log-line';
+    d.innerHTML = '<span class="' + cls + '">' + esc(text) + '</span>';
+    log.appendChild(d);
+  }
+
+  function renderFindings(alerts, risk, findings, gps) {
+    if (findings) Object.assign(globalFindings, findings);
+
+    // Risk badge
+    var rw = document.getElementById('risk-wrap');
+    var riskLabel = risk === 'high' ? '● High exposure' : risk === 'med' ? '◆ Medium exposure' : '✓ Low exposure';
+    var riskClass = 'risk-' + risk;
+    rw.innerHTML = '<span class="risk-badge ' + riskClass + '">' + riskLabel + '</span>';
+
+    // Alerts
+    var az = document.getElementById('alerts-zone');
+    az.innerHTML = '';
+    (alerts || []).forEach(function(a) {
+      var d = document.createElement('div');
+      d.className = 'alert-box alert-' + a.type;
+      d.innerHTML = '<span class="alert-icon">' + a.icon + '</span><span>' + esc(a.msg) + '</span>';
+      az.appendChild(d);
+    });
+
+    // Findings
+    var fz = document.getElementById('findings-zone');
+    fz.innerHTML = '';
+
+    // GPS map link
+    if (gps && gps.lat !== null) {
+      var locLabel = document.createElement('div');
+      locLabel.className = 'section-label';
+      locLabel.textContent = 'Location data';
+      fz.appendChild(locLabel);
+      var mapLink = document.createElement('a');
+      mapLink.id = 'map-link';
+      mapLink.href = 'https://maps.google.com/?q=' + gps.lat + ',' + gps.lon;
+      mapLink.target = '_blank';
+      mapLink.rel = 'noopener';
+      mapLink.innerHTML = '<span style="font-size:22px">🗺</span><div><div style="font-family:var(--sans);font-weight:600;font-size:13px">Open location in Google Maps</div><div class="gps-coords">' + gps.lat.toFixed(6) + ', ' + gps.lon.toFixed(6) + '</div></div><span class="map-arrow">↗</span>';
+      fz.appendChild(mapLink);
+    }
+
+    // Tag grid
+    if (findings && Object.keys(findings).length > 0) {
+      var ml = document.createElement('div');
+      ml.className = 'section-label';
+      ml.textContent = 'All metadata fields';
+      fz.appendChild(ml);
+
+      var grid = document.createElement('div');
+      grid.className = 'tag-grid';
+      var sensitive = ['gps', 'author', 'creator', 'owner', 'artist', 'copyright', 'modified by'];
+      Object.keys(findings).forEach(function(k) {
+        var isS = sensitive.some(function(s) { return k.toLowerCase().includes(s); });
+        var card = document.createElement('div');
+        card.className = 'tag-card';
+        card.innerHTML = '<div class="tag-key">' + esc(k) + '</div><div class="tag-val' + (isS ? ' highlight' : '') + '">' + esc(findings[k]) + '</div>';
+        grid.appendChild(card);
+      });
+      fz.appendChild(grid);
+    } else {
+      var nd = document.createElement('div');
+      nd.className = 'no-data';
+      nd.textContent = 'No extractable metadata fields found in this file.';
+      fz.appendChild(nd);
+    }
+  }
+
+  function exportReport() {
+    var lines = [
+      '================================================',
+      '   METADATA FORENSICS REPORT',
+      '================================================',
+      'File     : ' + (globalFile ? globalFile.name : 'unknown'),
+      'Scanned  : ' + new Date().toLocaleString(),
+      'Tool     : Metadata Forensics Tool (browser-based)',
+      '',
+      '--- METADATA FIELDS ---',
+    ];
+    Object.keys(globalFindings).forEach(function(k) {
+      lines.push(k.padEnd(28) + ': ' + globalFindings[k]);
+    });
+    lines.push('');
+    lines.push('================================================');
+    lines.push('Files never leave your device — all analysis runs locally.');
+    var blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'metareport_' + (globalFile ? globalFile.name.replace(/\.[^/.]+$/, '') : 'unknown') + '.txt';
+    a.click();
+  }
+
+  function resetTool() {
+    document.getElementById('drop-zone').style.display = 'block';
+    document.getElementById('results').style.display = 'none';
+    document.getElementById('file-input').value = '';
+    globalFindings = {};
+    globalFile = null;
+  }
+</script>
+</body>
+</html>
