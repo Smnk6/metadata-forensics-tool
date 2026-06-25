@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Metadata Forensics Tool</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/exif-js/2.3.0/exif.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exifreader@4.41.0/dist/exif-reader.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -431,14 +432,14 @@
 <div class="page-wrap">
 
   <header>
-    <div class="header-badge">Security Tool · v1.0</div>
+    <div class="header-badge">Security Tool · v2.0</div>
     <h1>Metadata <span>Forensics</span></h1>
-    <p class="subtitle">Expose hidden data inside images, PDFs, Word docs, and audio files — no upload, runs entirely in your browser.</p>
+    <p class="subtitle">Expose hidden data inside images, PDFs, Word docs, and audio files — files stay local, analysis runs in your browser.</p>
   </header>
 
   <!-- Drop Zone -->
   <div id="drop-zone" role="button" aria-label="Upload a file to analyze its metadata">
-    <input type="file" id="file-input" accept="image/*,.pdf,.docx,.doc,.mp3,.mp4,.wav" aria-label="Choose file">
+    <input type="file" id="file-input" accept="image/*,.pdf,.docx,.doc,.mp3,.m4a,.mp4,.wav,.flac,.ogg" aria-label="Choose file">
     <span class="drop-icon">🔍</span>
     <div class="drop-title">Drop any file here to inspect its metadata</div>
     <div class="drop-sub">Files never leave your device — all analysis runs locally.</div>
@@ -447,7 +448,8 @@
       <span class="type-pill">PNG</span>
       <span class="type-pill">PDF</span>
       <span class="type-pill">DOCX</span>
-      <span class="type-pill">MP3 / WAV</span>
+      <span class="type-pill">MP3 / M4A / WAV</span>
+      <span class="type-pill">FLAC / OGG</span>
     </div>
   </div>
 
@@ -484,27 +486,236 @@
   </div>
 
   <footer>
-    <span>Metadata Forensics Tool — open source, runs entirely in-browser</span>
-    <span>No data is sent to any server. Ever.</span>
+    <span>Metadata Forensics Tool — open source, browser-side analysis</span>
+    <span>Files stay on this device; parser libraries load from CDN.</span>
   </footer>
 
 </div>
 
 <script>
   var globalFindings = {};
+  var globalAlerts = [];
+  var globalRisk = 'low';
   var globalFile = null;
+  var currentThumbUrl = null;
+  var scanToken = 0;
+  var pdfjsLibPromise = null;
+
+  var PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.0.227/build/pdf.mjs';
+  var SENSITIVE_KEYS = [
+    'gps', 'latitude', 'longitude', 'author', 'creator', 'owner', 'artist',
+    'copyright', 'modified by', 'last saved by', 'company', 'manager',
+    'serial', 'comment', 'track changes', 'revision', 'software', 'producer',
+    'encoder', 'application'
+  ];
+
+  var ID3_TEXT_FRAMES = {
+    TIT2: 'Title', TPE1: 'Artist', TPE2: 'Album Artist', TALB: 'Album',
+    TCON: 'Genre', TDRC: 'Recording Date', TYER: 'Year', TDAT: 'Date',
+    TIME: 'Time', TENC: 'Encoder Software', TSSE: 'Encoding Settings',
+    TCOP: 'Copyright', TOPE: 'Original Artist', TCOM: 'Composer',
+    TEXT: 'Lyricist', TPUB: 'Publisher', TOWN: 'File Owner',
+    TRCK: 'Track Number', TPOS: 'Disc Number', TBPM: 'BPM', TLEN: 'Duration',
+    TSRC: 'ISRC', TLAN: 'Language'
+  };
+
+  var ID3_V22_FRAMES = {
+    TT2: 'TIT2', TP1: 'TPE1', TP2: 'TPE2', TAL: 'TALB', TCO: 'TCON',
+    TYE: 'TYER', TEN: 'TENC', TSS: 'TSSE', TCR: 'TCOP', TCM: 'TCOM',
+    TRK: 'TRCK', TPA: 'TPOS', TBP: 'TBPM', TLE: 'TLEN', COM: 'COMM',
+    WXX: 'WXXX', PIC: 'APIC'
+  };
+
+  var MP4_META_LABELS = {
+    '\u00a9nam': 'Title',
+    '\u00a9ART': 'Artist',
+    aART: 'Album Artist',
+    '\u00a9alb': 'Album',
+    '\u00a9day': 'Date',
+    '\u00a9gen': 'Genre',
+    '\u00a9wrt': 'Composer',
+    '\u00a9too': 'Encoding Tool',
+    cprt: 'Copyright',
+    desc: 'Description',
+    ldes: 'Long Description',
+    keyw: 'Keywords',
+    sonm: 'Sort Name',
+    soar: 'Sort Artist',
+    soal: 'Sort Album',
+    soaa: 'Sort Album Artist',
+    trkn: 'Track Number',
+    disk: 'Disc Number',
+    tmpo: 'BPM',
+    cpil: 'Compilation',
+    covr: 'Cover Art'
+  };
 
   function fmtSize(b) {
+    if (!Number.isFinite(b)) return 'unknown';
     if (b < 1024) return b + ' B';
     if (b < 1048576) return Math.round(b / 1024) + ' KB';
     return (b / 1048576).toFixed(1) + ' MB';
   }
 
   function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
-  // Drag & drop
+  function sleep(ms) {
+    return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  }
+
+  function getExt(file) {
+    var name = (file && file.name ? file.name : '').toLowerCase();
+    var m = name.match(/\.([^.]+)$/);
+    return m ? m[1] : '';
+  }
+
+  function fileDate(ms) {
+    return ms ? new Date(ms).toLocaleString() : 'unknown';
+  }
+
+  function normalizeValue(value) {
+    if (value === undefined || value === null) return '';
+    if (value instanceof Date) return value.toLocaleString();
+    if (Array.isArray(value)) {
+      return value.map(normalizeValue).filter(Boolean).join(', ');
+    }
+    if (typeof value === 'object') {
+      if (value.description !== undefined && value.description !== null && value.description !== '') {
+        return normalizeValue(value.description);
+      }
+      if (value.value !== undefined && value.value !== null && value.value !== '') {
+        return normalizeValue(value.value);
+      }
+      if (value.numerator !== undefined && value.denominator) {
+        return String(value.numerator / value.denominator);
+      }
+      try {
+        return JSON.stringify(value);
+      } catch (e) {
+        return String(value);
+      }
+    }
+    return String(value).replace(/\s+/g, ' ').trim();
+  }
+
+  function addFinding(findings, key, value) {
+    var text = normalizeValue(value);
+    if (!text) return;
+    if (text.length > 600) text = text.slice(0, 597) + '...';
+    var label = key;
+    var n = 2;
+    while (Object.prototype.hasOwnProperty.call(findings, label)) {
+      if (findings[label] === text) return;
+      label = key + ' (' + n++ + ')';
+    }
+    findings[label] = text;
+  }
+
+  function addAlert(alerts, type, icon, msg) {
+    var exists = alerts.some(function(a) { return a.msg === msg; });
+    if (!exists) alerts.push({ type: type, icon: icon, msg: msg });
+  }
+
+  function calculateRisk(alerts, findings) {
+    if (alerts.some(function(a) { return a.type === 'danger'; })) return 'high';
+    if (alerts.some(function(a) { return a.type === 'warn'; })) return 'med';
+    var keys = Object.keys(findings || {});
+    var hasSensitive = keys.some(function(k) {
+      var lk = k.toLowerCase();
+      return SENSITIVE_KEYS.some(function(s) { return lk.includes(s); });
+    });
+    return hasSensitive ? 'med' : 'low';
+  }
+
+  function mergeResult(base, result) {
+    Object.keys(result.findings || {}).forEach(function(k) {
+      addFinding(base.findings, k, result.findings[k]);
+    });
+    (result.alerts || []).forEach(function(a) {
+      addAlert(base.alerts, a.type, a.icon, a.msg);
+    });
+    if (result.gps) base.gps = result.gps;
+  }
+
+  function addCommonPrivacyAlerts(findings, alerts) {
+    var fileShellKeys = {
+      'File Name': true,
+      'File Size': true,
+      'MIME Type': true,
+      'Last Modified': true
+    };
+    var keys = Object.keys(findings).filter(function(k) { return !fileShellKeys[k]; });
+    var field = function(patterns) {
+      for (var i = 0; i < keys.length; i++) {
+        var lk = keys[i].toLowerCase();
+        for (var j = 0; j < patterns.length; j++) {
+          if (lk.includes(patterns[j])) return { key: keys[i], value: findings[keys[i]] };
+        }
+      }
+      return null;
+    };
+
+    var gps = field(['gps coordinates', 'latitude', 'longitude']);
+    if (gps) {
+      addAlert(alerts, 'danger', '📍', 'Location data is present. This can reveal where the file was created or captured.');
+    }
+
+    var identity = field(['author', 'creator', 'artist', 'owner', 'last saved by', 'modified by', 'company', 'manager', 'originator']);
+    if (identity) {
+      addAlert(alerts, 'warn', '🪪', 'Identity metadata found in "' + identity.key + '": ' + identity.value + '.');
+    }
+
+    var software = field(['software', 'application', 'producer', 'encoder', 'encoding tool', 'creator tool', 'app version']);
+    if (software) {
+      addAlert(alerts, 'warn', '🔧', 'Software fingerprint found in "' + software.key + '": ' + software.value + '.');
+    }
+
+    var revision = field(['revision', 'track changes', 'tracked change', 'comment authors', 'last editor']);
+    if (revision) {
+      addAlert(alerts, 'warn', '✏️', 'Editing history metadata is present in "' + revision.key + '".');
+    }
+
+    var date = field(['created', 'modified', 'date taken', 'recording date', 'origination date', 'metadata date']);
+    if (date) {
+      addAlert(alerts, 'info', '📅', 'Timestamp metadata is present. This can reveal creation or editing timelines.');
+    }
+  }
+
+  function makeEmptySuccess(alerts, findings, label) {
+    if (Object.keys(findings).length === 0) {
+      addAlert(alerts, 'success', '🛡', 'No extractable ' + label + ' metadata fields were found.');
+    }
+  }
+
+  function addLog(text, cls) {
+    var log = document.getElementById('log-output');
+    var d = document.createElement('div');
+    d.className = 'log-line';
+    d.innerHTML = '<span class="' + cls + '">' + esc(text) + '</span>';
+    log.appendChild(d);
+  }
+
+  async function bootLog(file) {
+    var lines = [
+      { cls: 'prompt', text: '❯ metascan --real "' + file.name + '"' },
+      { cls: 'dim',    text: '  Initializing local parser stack...' },
+      { cls: 'val',    text: '  File: ' + file.name },
+      { cls: 'val',    text: '  Size: ' + fmtSize(file.size) + '  |  Type: ' + (file.type || 'unknown') },
+      { cls: 'dim',    text: '  Reading container structure and metadata blocks...' }
+    ];
+    for (var i = 0; i < lines.length; i++) {
+      addLog(lines[i].text, lines[i].cls);
+      await sleep(70);
+    }
+  }
+
   var dropZone = document.getElementById('drop-zone');
   var fileInput = document.getElementById('file-input');
   dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('drag-over'); });
@@ -519,346 +730,1226 @@
     if (fileInput.files[0]) processFile(fileInput.files[0]);
   });
 
-  function processFile(file) {
+  async function processFile(file) {
+    var myToken = ++scanToken;
     globalFile = file;
     globalFindings = {};
+    globalAlerts = [];
+    globalRisk = 'low';
+
     document.getElementById('drop-zone').style.display = 'none';
     document.getElementById('results').style.display = 'block';
     document.getElementById('terminal-title').textContent = 'scanning: ' + file.name;
-
-    var log = document.getElementById('log-output');
-    log.innerHTML = '';
-
-    var lines = [
-      { cls: 'prompt', text: '❯ metascan --verbose "' + file.name + '"' },
-      { cls: 'dim',    text: '  Initializing forensic scan engine...' },
-      { cls: 'val',    text: '  File: ' + file.name },
-      { cls: 'val',    text: '  Size: ' + fmtSize(file.size) + '  |  Type: ' + (file.type || 'unknown') },
-      { cls: 'dim',    text: '  Extracting metadata layers...' },
-    ];
-
-    var i = 0;
-    var timer = setInterval(function() {
-      if (i >= lines.length) { clearInterval(timer); return; }
-      var l = lines[i++];
-      var d = document.createElement('div');
-      d.className = 'log-line';
-      d.innerHTML = '<span class="' + l.cls + '">' + esc(l.text) + '</span>';
-      log.appendChild(d);
-    }, 150);
-
+    document.getElementById('log-output').innerHTML = '';
+    document.getElementById('alerts-zone').innerHTML = '';
+    document.getElementById('findings-zone').innerHTML = '';
+    document.getElementById('risk-wrap').innerHTML = '';
     document.getElementById('fname').textContent = file.name;
     document.getElementById('fmeta').textContent =
-      fmtSize(file.size) + ' · ' + (file.type || 'unknown type') + ' · Modified: ' + new Date(file.lastModified).toLocaleString();
+      fmtSize(file.size) + ' · ' + (file.type || 'unknown type') + ' · Modified: ' + fileDate(file.lastModified);
+    setThumbnail(file);
 
-    globalFindings['File Name']     = file.name;
-    globalFindings['File Size']     = fmtSize(file.size);
-    globalFindings['MIME Type']     = file.type || 'unknown';
-    globalFindings['Last Modified'] = new Date(file.lastModified).toLocaleString();
+    await bootLog(file);
+    if (myToken !== scanToken) return;
 
-    // Thumbnail
-    var tw = document.getElementById('thumb-wrap');
-    if (file.type && file.type.startsWith('image/')) {
-      var url = URL.createObjectURL(file);
-      tw.innerHTML = '<img src="' + url + '" alt="Thumbnail">';
-    } else if (file.type && file.type.startsWith('audio/')) {
-      tw.textContent = '🎵';
-    } else if (file.name.toLowerCase().endsWith('.pdf')) {
-      tw.textContent = '📕';
-    } else if (file.name.toLowerCase().match(/\.docx?$/)) {
-      tw.textContent = '📘';
-    }
-
-    // Route by type
-    if (file.type && file.type.startsWith('image/')) {
-      if (file.type === 'image/jpeg' || file.type === 'image/tiff') {
-        extractExif(file);
-      } else {
-        extractBasicImage(file);
-      }
-    } else if (file.name.toLowerCase().endsWith('.pdf')) {
-      extractPDF(file);
-    } else if (file.name.toLowerCase().match(/\.docx?$/)) {
-      extractDOCX(file);
-    } else if (file.type && file.type.startsWith('audio/')) {
-      extractAudio(file);
-    } else {
-      setTimeout(function() { renderFindings([], 'low', {}); }, 900);
+    try {
+      var result = await analyzeFile(file);
+      if (myToken !== scanToken) return;
+      addCommonPrivacyAlerts(result.findings, result.alerts);
+      result.risk = calculateRisk(result.alerts, result.findings);
+      addLog('  Found ' + Object.keys(result.findings).length + ' metadata fields.', 'val');
+      addLog('  Scan complete.', 'dim');
+      renderFindings(result.alerts, result.risk, result.findings, result.gps);
+    } catch (err) {
+      if (myToken !== scanToken) return;
+      var findings = baseFindings(file);
+      var alerts = [];
+      addAlert(alerts, 'danger', '⚠', 'The scan failed: ' + (err && err.message ? err.message : String(err)));
+      addLog('  Scan failed: ' + (err && err.message ? err.message : String(err)), 'warn');
+      renderFindings(alerts, 'high', findings);
     }
   }
 
-  /* ---- EXIF (JPEG/TIFF) ---- */
-  function extractExif(file) {
-    EXIF.getData(file, function() {
-      var tags = EXIF.getAllTags(this);
-      var findings = {};
-      var alerts = [];
-      var lat = null, lon = null;
+  function baseFindings(file) {
+    var findings = {};
+    addFinding(findings, 'File Name', file.name);
+    addFinding(findings, 'File Size', fmtSize(file.size));
+    addFinding(findings, 'MIME Type', file.type || 'unknown');
+    addFinding(findings, 'Last Modified', fileDate(file.lastModified));
+    return findings;
+  }
 
-      var keyMap = {
-        'Make': 'Camera Make', 'Model': 'Camera Model', 'Software': 'Software',
-        'DateTime': 'Date Taken', 'DateTimeOriginal': 'Original Date',
-        'Artist': 'Artist/Author', 'Copyright': 'Copyright',
-        'ImageDescription': 'Description', 'Flash': 'Flash Used',
-        'FocalLength': 'Focal Length', 'ISOSpeedRatings': 'ISO Speed',
-        'ExposureTime': 'Exposure Time', 'FNumber': 'Aperture (F-Number)',
-        'PixelXDimension': 'Width (px)', 'PixelYDimension': 'Height (px)',
-        'ColorSpace': 'Color Space', 'Orientation': 'Orientation',
-        'XResolution': 'X Resolution', 'YResolution': 'Y Resolution',
-        'GPSLatitude': '_lat', 'GPSLongitude': '_lon',
-        'GPSLatitudeRef': '_latr', 'GPSLongitudeRef': '_lonr',
-        'GPSAltitude': 'GPS Altitude (m)',
-        'ExifIFDPointer': null, 'MakerNote': null, 'UserComment': null,
+  async function analyzeFile(file) {
+    var result = { findings: baseFindings(file), alerts: [], gps: null, risk: 'low' };
+    var ext = getExt(file);
+    var type = file.type || '';
+
+    if (type.startsWith('image/') || ['jpg', 'jpeg', 'tif', 'tiff', 'png', 'webp', 'gif', 'heic', 'heif', 'avif', 'jxl'].includes(ext)) {
+      addLog('  Parser: ExifReader image metadata engine.', 'dim');
+      mergeResult(result, await extractImage(file));
+    } else if (ext === 'pdf' || type === 'application/pdf') {
+      addLog('  Parser: PDF.js document metadata engine.', 'dim');
+      mergeResult(result, await extractPDF(file));
+    } else if (ext === 'docx' || type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      addLog('  Parser: JSZip OOXML metadata engine.', 'dim');
+      mergeResult(result, await extractDOCX(file));
+    } else if (ext === 'doc' || type === 'application/msword') {
+      addLog('  Parser: legacy Office CFB property-set engine.', 'dim');
+      mergeResult(result, await extractLegacyOffice(file));
+    } else if (type.startsWith('audio/') || type.startsWith('video/') || ['mp3', 'm4a', 'mp4', 'wav', 'wave', 'flac', 'ogg', 'oga'].includes(ext)) {
+      addLog('  Parser: binary audio/video tag engine.', 'dim');
+      mergeResult(result, await extractMedia(file));
+    } else {
+      addAlert(result.alerts, 'info', 'ℹ', 'This file type is not covered by the current browser parser set.');
+    }
+
+    return result;
+  }
+
+  function setThumbnail(file) {
+    if (currentThumbUrl) {
+      URL.revokeObjectURL(currentThumbUrl);
+      currentThumbUrl = null;
+    }
+
+    var tw = document.getElementById('thumb-wrap');
+    tw.innerHTML = '';
+    var ext = getExt(file);
+
+    if ((file.type || '').startsWith('image/')) {
+      currentThumbUrl = URL.createObjectURL(file);
+      tw.innerHTML = '<img src="' + currentThumbUrl + '" alt="Thumbnail">';
+    } else if ((file.type || '').startsWith('audio/')) {
+      tw.textContent = '🎵';
+    } else if ((file.type || '').startsWith('video/') || ['mp4', 'm4a'].includes(ext)) {
+      tw.textContent = '🎞';
+    } else if (ext === 'pdf') {
+      tw.textContent = '📕';
+    } else if (ext === 'docx' || ext === 'doc') {
+      tw.textContent = '📘';
+    } else {
+      tw.textContent = '📄';
+    }
+  }
+
+  /* ---- Image metadata ---- */
+  async function extractImage(file) {
+    var findings = {};
+    var alerts = [];
+    var gps = null;
+
+    if (!window.ExifReader || typeof ExifReader.load !== 'function') {
+      addAlert(alerts, 'warn', '⚠', 'ExifReader did not load, so only browser image dimensions can be read.');
+    } else {
+      try {
+        var tags = await ExifReader.load(file, {
+          expanded: true,
+          includeUnknown: true,
+          async: true,
+          computed: true
+        });
+        flattenExifReaderTags(tags, findings);
+        gps = extractGpsFromExifReader(tags, findings);
+        addLog('  Parsed image metadata groups with ExifReader.', 'val');
+      } catch (err) {
+        var msg = err && err.name === 'MetadataMissingError'
+          ? 'No EXIF/XMP/IPTC metadata block was found in this image.'
+          : 'Image metadata parser warning: ' + (err && err.message ? err.message : String(err));
+        addAlert(alerts, 'info', 'ℹ', msg);
+      }
+    }
+
+    try {
+      var dims = await readImageDimensions(file);
+      addFinding(findings, 'Browser: Pixel Dimensions', dims.width + ' x ' + dims.height + ' px');
+      addFinding(findings, 'Browser: Megapixels', ((dims.width * dims.height) / 1000000).toFixed(2) + ' MP');
+    } catch (e) {
+      addAlert(alerts, 'info', 'ℹ', 'The browser could not decode dimensions for this image format.');
+    }
+
+    if (gps) {
+      addAlert(alerts, 'danger', '📍', 'GPS coordinates found: ' + gps.lat.toFixed(6) + ', ' + gps.lon.toFixed(6) + '.');
+    }
+    makeEmptySuccess(alerts, findings, 'image');
+    return { findings: findings, alerts: alerts, gps: gps };
+  }
+
+  function flattenExifReaderTags(tags, findings) {
+    var groupLabels = {
+      file: 'File', jfif: 'JFIF', exif: 'EXIF', gps: 'GPS', iptc: 'IPTC',
+      xmp: 'XMP', icc: 'ICC', mpf: 'MPF', photoshop: 'Photoshop',
+      png: 'PNG', pngText: 'PNG Text', gif: 'GIF', riff: 'RIFF',
+      composite: 'Composite'
+    };
+
+    Object.keys(groupLabels).forEach(function(group) {
+      var block = tags && tags[group];
+      if (!block || typeof block !== 'object') return;
+      Object.keys(block).forEach(function(key) {
+        if (key === '_raw' || key === 'Thumbnail') return;
+        addFinding(findings, groupLabels[group] + ': ' + key, tagDisplayValue(block[key]));
+      });
+    });
+
+    if (tags && !tags.exif && !tags.file) {
+      Object.keys(tags).forEach(function(key) {
+        if (key === 'Thumbnail' || typeof tags[key] === 'object' && groupLabels[key]) return;
+        addFinding(findings, 'Image: ' + key, tagDisplayValue(tags[key]));
+      });
+    }
+  }
+
+  function tagDisplayValue(tag) {
+    if (tag && typeof tag === 'object') {
+      if (tag.description !== undefined && tag.description !== null && tag.description !== '') return tag.description;
+      if (tag.value !== undefined) return tag.value;
+    }
+    return tag;
+  }
+
+  function tagNumber(tag) {
+    var value = tagDisplayValue(tag);
+    if (typeof value === 'number') return value;
+    if (Array.isArray(value) && value.length === 1 && typeof value[0] === 'number') return value[0];
+    var n = parseFloat(String(value).replace(/[^0-9.+-]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function extractGpsFromExifReader(tags, findings) {
+    var gpsGroup = tags && tags.gps ? tags.gps : null;
+    var lat = gpsGroup ? tagNumber(gpsGroup.Latitude) : null;
+    var lon = gpsGroup ? tagNumber(gpsGroup.Longitude) : null;
+    if (lat === null && tags && tags.exif) lat = gpsRationalToDecimal(tags.exif.GPSLatitude, tags.exif.GPSLatitudeRef);
+    if (lon === null && tags && tags.exif) lon = gpsRationalToDecimal(tags.exif.GPSLongitude, tags.exif.GPSLongitudeRef);
+    if (lat !== null && lon !== null) {
+      addFinding(findings, 'GPS Coordinates', lat.toFixed(6) + ', ' + lon.toFixed(6));
+      return { lat: lat, lon: lon };
+    }
+    return null;
+  }
+
+  function gpsRationalToDecimal(valueTag, refTag) {
+    var value = valueTag && valueTag.value !== undefined ? valueTag.value : valueTag;
+    var ref = normalizeValue(refTag && refTag.value !== undefined ? refTag.value : refTag);
+    if (!Array.isArray(value) || value.length < 3) return null;
+    function part(v) {
+      if (Array.isArray(v) && v.length >= 2) return v[0] / v[1];
+      if (v && typeof v === 'object' && v.numerator !== undefined) return v.numerator / v.denominator;
+      return Number(v);
+    }
+    var d = part(value[0]) + part(value[1]) / 60 + part(value[2]) / 3600;
+    if (ref === 'S' || ref === 'W') d = -d;
+    return Number.isFinite(d) ? d : null;
+  }
+
+  function readImageDimensions(file) {
+    return new Promise(function(resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function() {
+        URL.revokeObjectURL(url);
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
       };
-
-      function toDec(arr, ref) {
-        if (!arr || arr.length < 3) return null;
-        var d = arr[0] + arr[1] / 60 + arr[2] / 3600;
-        if (ref === 'S' || ref === 'W') d = -d;
-        return d;
-      }
-
-      for (var k in tags) {
-        if (tags[k] === undefined || tags[k] === null || tags[k] === '') continue;
-        var label = keyMap.hasOwnProperty(k) ? keyMap[k] : k;
-        if (label === null) continue;
-        if (k === 'GPSLatitude')   { lat = toDec(tags[k], tags['GPSLatitudeRef']);  continue; }
-        if (k === 'GPSLongitude')  { lon = toDec(tags[k], tags['GPSLongitudeRef']); continue; }
-        if (k === 'GPSLatitudeRef' || k === 'GPSLongitudeRef') continue;
-        if (label.startsWith('_')) continue;
-        var val = tags[k];
-        if (val && val.numerator !== undefined) val = (val.numerator / val.denominator).toFixed(2);
-        if (Array.isArray(val)) val = val.join(', ');
-        if (String(val).length > 90) val = String(val).substring(0, 90) + '…';
-        findings[label] = String(val);
-      }
-
-      if (lat !== null && lon !== null) {
-        findings['GPS Coordinates'] = lat.toFixed(6) + ', ' + lon.toFixed(6);
-        alerts.push({ type: 'danger', icon: '📍', msg: 'GPS location data found! Coordinates: ' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '. Anyone who receives this image can pinpoint the exact location where it was taken.' });
-      }
-      if (findings['Camera Make'] || findings['Camera Model']) {
-        alerts.push({ type: 'warn', icon: '📱', msg: 'Device fingerprint embedded: ' + (findings['Camera Make'] || '') + ' ' + (findings['Camera Model'] || '') + '. This links multiple photos back to the same physical device.' });
-      }
-      if (findings['Software']) {
-        alerts.push({ type: 'warn', icon: '🔧', msg: 'Software version exposed: ' + findings['Software'] + '. Attackers cross-reference software versions with known CVEs to find unpatched vulnerabilities.' });
-      }
-      if (findings['Artist/Author'] || findings['Copyright']) {
-        alerts.push({ type: 'info', icon: '🪪', msg: 'Identity information found: "' + (findings['Artist/Author'] || findings['Copyright']) + '". Can be used to deanonymize the file creator.' });
-      }
-      if (Object.keys(findings).length < 3 && lat === null) {
-        alerts.push({ type: 'success', icon: '🛡', msg: 'Very little metadata found. This image may already have been stripped of EXIF data, or was created digitally without embedded camera data.' });
-      }
-
-      var risk = lat !== null ? 'high' : (alerts.length > 1 ? 'med' : 'low');
-      addLog('  Found ' + Object.keys(findings).length + ' metadata fields.', 'val');
-      if (lat !== null) addLog('  ⚠  GPS coordinates detected — real-world location exposed!', 'warn');
-      addLog('  Scan complete.', 'dim');
-
-      renderFindings(alerts, risk, findings, lat !== null ? { lat: lat, lon: lon } : null);
+      img.onerror = function() {
+        URL.revokeObjectURL(url);
+        reject(new Error('Image decode failed'));
+      };
+      img.src = url;
     });
   }
 
-  /* ---- Basic image (PNG, WebP, GIF) ---- */
-  function extractBasicImage(file) {
-    var img = new Image();
-    var url = URL.createObjectURL(file);
-    img.onload = function() {
-      var findings = {};
-      findings['Dimensions']  = img.naturalWidth + ' × ' + img.naturalHeight + ' px';
-      findings['Megapixels']  = ((img.naturalWidth * img.naturalHeight) / 1000000).toFixed(2) + ' MP';
-      var alerts = [
-        { type: 'info', icon: 'ℹ', msg: 'PNG/WebP/GIF images rarely carry EXIF GPS data. The browser can read basic image dimensions for this format. For deeper analysis of PNG text chunks, use ExifTool on the command line.' }
-      ];
-      addLog('  PNG/WebP detected — EXIF support is limited in-browser.', 'dim');
-      addLog('  Extracted basic image properties.', 'val');
-      addLog('  Scan complete.', 'dim');
-      renderFindings(alerts, 'low', findings);
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
+  /* ---- PDF metadata ---- */
+  async function extractPDF(file) {
+    var findings = {};
+    var alerts = [];
+    var buffer = await file.arrayBuffer();
+
+    try {
+      var pdfjsLib = await loadPdfJs();
+      var task = pdfjsLib.getDocument({
+        data: new Uint8Array(buffer.slice(0)),
+        disableWorker: true
+      });
+      var pdf = await task.promise;
+      addFinding(findings, 'PDF: Pages', pdf.numPages);
+
+      var meta = await pdf.getMetadata().catch(function() { return null; });
+      if (meta && meta.info) mapPdfInfo(meta.info, findings);
+      if (meta && meta.metadata) mapPdfXmp(meta.metadata, findings);
+      if (typeof pdf.getAttachments === 'function') {
+        var attachments = await pdf.getAttachments().catch(function() { return null; });
+        if (attachments) addFinding(findings, 'PDF: Embedded Attachments', Object.keys(attachments).length);
+      }
+      if (pdf.destroy) await pdf.destroy();
+      addLog('  PDF.js parsed document catalog and metadata streams.', 'val');
+    } catch (err) {
+      addAlert(alerts, 'warn', '⚠', 'PDF.js could not fully parse this file; falling back to raw Info/XMP scan.');
+      addLog('  PDF.js warning: ' + (err && err.message ? err.message : String(err)), 'warn');
+    }
+
+    mapObjectIntoFindings(parsePdfFallback(buffer), findings, 'PDF');
+    makeEmptySuccess(alerts, findings, 'PDF');
+    return { findings: findings, alerts: alerts };
   }
 
-  /* ---- PDF ---- */
-  function extractPDF(file) {
-    var reader = new FileReader();
-    reader.onload = function(e) {
-      var bytes = new Uint8Array(e.target.result);
-      var str = '';
-      for (var i = 0; i < Math.min(bytes.length, 10000); i++) str += String.fromCharCode(bytes[i]);
+  function loadPdfJs() {
+    if (!pdfjsLibPromise) {
+      pdfjsLibPromise = import(PDFJS_URL);
+    }
+    return pdfjsLibPromise;
+  }
 
-      var findings = {};
-      var alerts = [];
-      var fields = {
-        '/Author': 'Author', '/Creator': 'Creator Application',
-        '/Producer': 'Producer', '/Title': 'Document Title',
-        '/Subject': 'Subject', '/Keywords': 'Keywords',
-        '/CreationDate': 'Creation Date', '/ModDate': 'Modified Date',
-      };
+  function mapPdfInfo(info, findings) {
+    var labels = {
+      PDFFormatVersion: 'PDF: Version',
+      Language: 'PDF: Language',
+      Title: 'PDF: Title',
+      Author: 'PDF: Author',
+      Subject: 'PDF: Subject',
+      Keywords: 'PDF: Keywords',
+      Creator: 'PDF: Creator Application',
+      Producer: 'PDF: Producer',
+      CreationDate: 'PDF: Creation Date',
+      ModDate: 'PDF: Modified Date',
+      Trapped: 'PDF: Trapped',
+      IsLinearized: 'PDF: Linearized',
+      IsAcroFormPresent: 'PDF: AcroForm Present',
+      IsXFAPresent: 'PDF: XFA Present',
+      IsCollectionPresent: 'PDF: Collection Present',
+      IsSignaturesPresent: 'PDF: Signatures Present'
+    };
+    Object.keys(info).forEach(function(k) {
+      var label = labels[k] || ('PDF: ' + k);
+      var value = k === 'CreationDate' || k === 'ModDate' ? decodePdfDate(info[k]) : info[k];
+      addFinding(findings, label, value);
+    });
+  }
 
-      for (var key in fields) {
-        var re = new RegExp(key.replace('/', '\\/') + '\\s*\\(([^)]{1,120})\\)', 'i');
-        var m = str.match(re);
-        if (m && m[1] && m[1].trim().length > 2) {
-          findings[fields[key]] = m[1].trim().replace(/[^\x20-\x7E]/g, '?');
+  function mapPdfXmp(metadata, findings) {
+    var all = {};
+    if (metadata && typeof metadata.getAll === 'function') {
+      all = metadata.getAll() || {};
+    } else if (metadata && metadata._metadataMap) {
+      metadata._metadataMap.forEach(function(value, key) { all[key] = value; });
+    }
+    Object.keys(all).forEach(function(k) {
+      addFinding(findings, 'PDF XMP: ' + k, all[k]);
+    });
+  }
+
+  function decodePdfDate(value) {
+    var s = normalizeValue(value);
+    var m = /^D:?(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?([Zz]|[+-]\d{2}'?\d{2}'?)?$/.exec(s);
+    if (!m) return s;
+    var y = Number(m[1]);
+    var mo = Number(m[2] || 1) - 1;
+    var d = Number(m[3] || 1);
+    var h = Number(m[4] || 0);
+    var mi = Number(m[5] || 0);
+    var se = Number(m[6] || 0);
+    var date = new Date(Date.UTC(y, mo, d, h, mi, se));
+    var tz = m[7];
+    if (tz && tz !== 'Z' && tz !== 'z') {
+      var sign = tz[0] === '-' ? -1 : 1;
+      var parts = tz.slice(1).replace(/'/g, '').match(/(\d{2})(\d{2})/);
+      if (parts) {
+        var offset = sign * (Number(parts[1]) * 60 + Number(parts[2]));
+        date = new Date(date.getTime() - offset * 60000);
+      }
+    }
+    return date.toLocaleString();
+  }
+
+  function parsePdfFallback(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var head = bytesToLatin1(bytes.subarray(0, Math.min(bytes.length, 2097152)));
+    var tail = bytesToLatin1(bytes.subarray(Math.max(0, bytes.length - 2097152)));
+    var text = head + '\n' + tail;
+    var out = {};
+    ['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer', 'CreationDate', 'ModDate'].forEach(function(key) {
+      var value = findPdfNameValue(text, key);
+      if (value) out[key === 'CreationDate' ? 'Creation Date' : key === 'ModDate' ? 'Modified Date' : key] =
+        key === 'CreationDate' || key === 'ModDate' ? decodePdfDate(value) : value;
+    });
+
+    var xmp = extractXmpPacket(text);
+    if (xmp) {
+      var xmpFields = parseXmpXml(xmp);
+      Object.keys(xmpFields).forEach(function(k) { out['XMP ' + k] = xmpFields[k]; });
+    }
+    return out;
+  }
+
+  function findPdfNameValue(text, key) {
+    var re = new RegExp('/' + key + '\\s*(\\((?:\\\\.|[^\\\\)]){0,2048}\\)|<([0-9A-Fa-f\\s]{2,4096})>)', 'i');
+    var m = re.exec(text);
+    if (!m) return '';
+    if (m[1] && m[1][0] === '(') return decodePdfLiteralString(m[1].slice(1, -1));
+    if (m[2]) return decodePdfHexString(m[2]);
+    return '';
+  }
+
+  function decodePdfLiteralString(s) {
+    return s.replace(/\\([nrtbf()\\])/g, function(_, ch) {
+      return { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', '(': '(', ')': ')', '\\': '\\' }[ch] || ch;
+    }).replace(/\\([0-7]{1,3})/g, function(_, oct) {
+      return String.fromCharCode(parseInt(oct, 8));
+    }).replace(/\\\r?\n/g, '').trim();
+  }
+
+  function decodePdfHexString(hex) {
+    var clean = hex.replace(/\s+/g, '');
+    if (clean.length % 2) clean += '0';
+    var bytes = [];
+    for (var i = 0; i < clean.length; i += 2) bytes.push(parseInt(clean.slice(i, i + 2), 16));
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) return decodeUtf16Be(new Uint8Array(bytes.slice(2))).trim();
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) return decodeUtf16Le(new Uint8Array(bytes.slice(2))).trim();
+    return bytesToLatin1(new Uint8Array(bytes)).trim();
+  }
+
+  function extractXmpPacket(text) {
+    var m = /<x:xmpmeta[\s\S]*?<\/x:xmpmeta>|<rdf:RDF[\s\S]*?<\/rdf:RDF>/i.exec(text);
+    return m ? m[0] : '';
+  }
+
+  function parseXmpXml(xml) {
+    var doc = parseXml(xml);
+    var out = {};
+    if (!doc) return out;
+    [
+      ['title', 'Title'], ['creator', 'Creator'], ['description', 'Description'],
+      ['subject', 'Subject'], ['CreateDate', 'Create Date'], ['ModifyDate', 'Modify Date'],
+      ['MetadataDate', 'Metadata Date'], ['CreatorTool', 'Creator Tool'],
+      ['format', 'Format'], ['DocumentID', 'Document ID'], ['InstanceID', 'Instance ID']
+    ].forEach(function(pair) {
+      var value = xmlTextByLocalName(doc, pair[0]);
+      if (value) out[pair[1]] = value;
+    });
+    return out;
+  }
+
+  /* ---- DOCX / OOXML metadata ---- */
+  async function extractDOCX(file) {
+    var findings = {};
+    var alerts = [];
+
+    if (!window.JSZip) {
+      addAlert(alerts, 'danger', '⚠', 'JSZip did not load, so DOCX metadata cannot be extracted.');
+      return { findings: findings, alerts: alerts };
+    }
+
+    var zip = await JSZip.loadAsync(file);
+    var names = Object.keys(zip.files);
+    addFinding(findings, 'DOCX: Archive Entries', names.length);
+
+    var core = await zipText(zip, 'docProps/core.xml');
+    if (core) mapDocxCore(core, findings);
+
+    var app = await zipText(zip, 'docProps/app.xml');
+    if (app) mapDocxApp(app, findings);
+
+    var custom = await zipText(zip, 'docProps/custom.xml');
+    if (custom) mapDocxCustom(custom, findings);
+
+    var thumb = names.filter(function(n) { return /^docProps\/thumbnail\./i.test(n); })[0];
+    if (thumb) addFinding(findings, 'DOCX: Embedded Thumbnail', thumb);
+
+    await mapDocxReviewData(zip, findings);
+
+    addLog('  Decompressed DOCX and read docProps XML files.', 'val');
+    makeEmptySuccess(alerts, findings, 'DOCX');
+    return { findings: findings, alerts: alerts };
+  }
+
+  function zipText(zip, path) {
+    var entry = zip.file(path);
+    return entry ? entry.async('text') : Promise.resolve('');
+  }
+
+  function mapDocxCore(xml, findings) {
+    var doc = parseXml(xml);
+    if (!doc) return;
+    [
+      ['title', 'DOCX Core: Title'], ['subject', 'DOCX Core: Subject'],
+      ['creator', 'DOCX Core: Author'], ['keywords', 'DOCX Core: Keywords'],
+      ['description', 'DOCX Core: Description'], ['lastModifiedBy', 'DOCX Core: Last Modified By'],
+      ['revision', 'DOCX Core: Revision'], ['created', 'DOCX Core: Created'],
+      ['modified', 'DOCX Core: Modified'], ['category', 'DOCX Core: Category'],
+      ['contentStatus', 'DOCX Core: Content Status'], ['identifier', 'DOCX Core: Identifier'],
+      ['language', 'DOCX Core: Language'], ['version', 'DOCX Core: Version']
+    ].forEach(function(pair) {
+      addFinding(findings, pair[1], xmlTextByLocalName(doc, pair[0]));
+    });
+  }
+
+  function mapDocxApp(xml, findings) {
+    var doc = parseXml(xml);
+    if (!doc) return;
+    [
+      ['Application', 'DOCX App: Application'], ['AppVersion', 'DOCX App: Version'],
+      ['Company', 'DOCX App: Company'], ['Manager', 'DOCX App: Manager'],
+      ['Template', 'DOCX App: Template'], ['TotalTime', 'DOCX App: Total Editing Minutes'],
+      ['Pages', 'DOCX App: Pages'], ['Words', 'DOCX App: Words'],
+      ['Characters', 'DOCX App: Characters'], ['CharactersWithSpaces', 'DOCX App: Characters With Spaces'],
+      ['Lines', 'DOCX App: Lines'], ['Paragraphs', 'DOCX App: Paragraphs'],
+      ['Slides', 'DOCX App: Slides'], ['Notes', 'DOCX App: Notes'],
+      ['HiddenSlides', 'DOCX App: Hidden Slides'], ['HyperlinksChanged', 'DOCX App: Hyperlinks Changed'],
+      ['SharedDoc', 'DOCX App: Shared Document'], ['LinksUpToDate', 'DOCX App: Links Up To Date']
+    ].forEach(function(pair) {
+      addFinding(findings, pair[1], xmlTextByLocalName(doc, pair[0]));
+    });
+  }
+
+  function mapDocxCustom(xml, findings) {
+    var doc = parseXml(xml);
+    if (!doc) return;
+    var props = Array.prototype.filter.call(doc.getElementsByTagName('*'), function(el) {
+      return el.localName === 'property';
+    });
+    props.forEach(function(prop) {
+      var name = prop.getAttribute('name') || prop.getAttribute('fmtid') || 'Custom Property';
+      addFinding(findings, 'DOCX Custom: ' + name, prop.textContent);
+    });
+    if (props.length) addFinding(findings, 'DOCX Custom: Property Count', props.length);
+  }
+
+  async function mapDocxReviewData(zip, findings) {
+    var settings = await zipText(zip, 'word/settings.xml');
+    if (settings && /<w:trackRevisions\b/i.test(settings)) {
+      addFinding(findings, 'DOCX Review: Track Changes Enabled', 'yes');
+    }
+
+    var reviewFiles = ['word/document.xml', 'word/comments.xml', 'word/footnotes.xml', 'word/endnotes.xml'];
+    var authors = {};
+    var changeCount = 0;
+    var commentCount = 0;
+    for (var i = 0; i < reviewFiles.length; i++) {
+      var xml = await zipText(zip, reviewFiles[i]);
+      if (!xml) continue;
+      var changes = xml.match(/<w:(ins|del|moveFrom|moveTo)\b/g);
+      if (changes) changeCount += changes.length;
+      var comments = xml.match(/<w:comment\b/g);
+      if (comments) commentCount += comments.length;
+      var re = /w:author="([^"]+)"/g;
+      var m;
+      while ((m = re.exec(xml))) authors[decodeXmlEntities(m[1])] = true;
+    }
+    if (changeCount) addFinding(findings, 'DOCX Review: Tracked Change Markers', changeCount);
+    if (commentCount) addFinding(findings, 'DOCX Review: Comment Count', commentCount);
+    var authorList = Object.keys(authors);
+    if (authorList.length) addFinding(findings, 'DOCX Review: Comment/Edit Authors', authorList.join(', '));
+  }
+
+  function parseXml(xml) {
+    try {
+      var doc = new DOMParser().parseFromString(xml, 'application/xml');
+      if (doc.getElementsByTagName('parsererror').length) return null;
+      return doc;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function xmlTextByLocalName(doc, name) {
+    var nodes = Array.prototype.filter.call(doc.getElementsByTagName('*'), function(el) {
+      return el.localName === name;
+    });
+    if (!nodes.length) return '';
+    return nodes.map(function(el) { return el.textContent.trim(); }).filter(Boolean).join(', ');
+  }
+
+  function decodeXmlEntities(value) {
+    var div = document.createElement('textarea');
+    div.innerHTML = value;
+    return div.value;
+  }
+
+  /* ---- Legacy Office .doc CFB metadata ---- */
+  async function extractLegacyOffice(file) {
+    var findings = {};
+    var alerts = [];
+    var buffer = await file.arrayBuffer();
+
+    try {
+      var cfb = parseCfb(buffer);
+      addFinding(findings, 'Office CFB: Directory Entries', cfb.entries.length);
+      var summary = readCfbStreamByName(cfb, '\u0005SummaryInformation');
+      var docSummary = readCfbStreamByName(cfb, '\u0005DocumentSummaryInformation');
+      if (summary) mapObjectIntoFindings(parsePropertySet(summary, 'SummaryInformation'), findings, 'Office Summary');
+      if (docSummary) mapObjectIntoFindings(parsePropertySet(docSummary, 'DocumentSummaryInformation'), findings, 'Office Document Summary');
+      if (!summary && !docSummary) addAlert(alerts, 'info', 'ℹ', 'The legacy Office file was readable, but standard summary streams were not found.');
+      addLog('  Parsed OLE Compound File summary property streams.', 'val');
+    } catch (err) {
+      addAlert(alerts, 'warn', '⚠', 'Legacy .doc metadata parser could not read this file: ' + (err && err.message ? err.message : String(err)));
+    }
+
+    makeEmptySuccess(alerts, findings, 'legacy Office');
+    return { findings: findings, alerts: alerts };
+  }
+
+  function parseCfb(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var magic = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    for (var i = 0; i < magic.length; i++) {
+      if (bytes[i] !== magic[i]) throw new Error('not an OLE Compound File');
+    }
+
+    var view = new DataView(buffer);
+    var sectorSize = 1 << view.getUint16(30, true);
+    var miniSectorSize = 1 << view.getUint16(32, true);
+    var numFatSectors = view.getUint32(44, true);
+    var firstDirSector = view.getUint32(48, true);
+    var miniCutoff = view.getUint32(56, true);
+    var firstMiniFatSector = view.getUint32(60, true);
+    var numMiniFatSectors = view.getUint32(64, true);
+    var firstDifatSector = view.getUint32(68, true);
+    var numDifatSectors = view.getUint32(72, true);
+
+    function sectorOffset(sid) { return (sid + 1) * sectorSize; }
+    function sectorBytes(sid) {
+      var start = sectorOffset(sid);
+      return bytes.subarray(start, Math.min(start + sectorSize, bytes.length));
+    }
+
+    var fatSectorIds = [];
+    for (var d = 0; d < 109; d++) {
+      var id = view.getUint32(76 + d * 4, true);
+      if (id !== 0xffffffff) fatSectorIds.push(id);
+    }
+    var difat = firstDifatSector;
+    for (var ds = 0; ds < numDifatSectors && difat !== 0xfffffffe && difat !== 0xffffffff; ds++) {
+      var sec = sectorBytes(difat);
+      var dv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
+      for (var di = 0; di < sectorSize / 4 - 1; di++) {
+        var fid = dv.getUint32(di * 4, true);
+        if (fid !== 0xffffffff) fatSectorIds.push(fid);
+      }
+      difat = dv.getUint32(sectorSize - 4, true);
+    }
+    fatSectorIds = fatSectorIds.slice(0, numFatSectors);
+
+    var fat = [];
+    fatSectorIds.forEach(function(sid) {
+      var sec = sectorBytes(sid);
+      var dv = new DataView(sec.buffer, sec.byteOffset, sec.byteLength);
+      for (var p = 0; p + 4 <= sec.byteLength; p += 4) fat.push(dv.getUint32(p, true));
+    });
+
+    function readChain(startSid, sizeLimit) {
+      if (startSid === 0xfffffffe || startSid === 0xffffffff) return new Uint8Array(0);
+      var chunks = [];
+      var sid = startSid;
+      var guard = 0;
+      var total = 0;
+      while (sid !== 0xfffffffe && sid !== 0xffffffff && sid < fat.length && guard++ < fat.length + 1) {
+        var sec = sectorBytes(sid);
+        chunks.push(sec);
+        total += sec.byteLength;
+        sid = fat[sid];
+      }
+      var out = concatChunks(chunks, total);
+      return sizeLimit !== undefined ? out.subarray(0, sizeLimit) : out;
+    }
+
+    var directoryBytes = readChain(firstDirSector);
+    var entries = [];
+    for (var off = 0; off + 128 <= directoryBytes.length; off += 128) {
+      var entry = directoryBytes.subarray(off, off + 128);
+      var ev = new DataView(entry.buffer, entry.byteOffset, entry.byteLength);
+      var nameLength = ev.getUint16(64, true);
+      var name = nameLength >= 2 ? decodeUtf16Le(entry.subarray(0, nameLength - 2)) : '';
+      var sizeLow = ev.getUint32(120, true);
+      var sizeHigh = ev.getUint32(124, true);
+      entries.push({
+        name: name,
+        type: entry[66],
+        start: ev.getUint32(116, true),
+        size: sizeHigh ? sizeHigh * 4294967296 + sizeLow : sizeLow
+      });
+    }
+
+    var root = entries.filter(function(e) { return e.type === 5; })[0];
+    var miniFat = [];
+    if (numMiniFatSectors && firstMiniFatSector !== 0xfffffffe && firstMiniFatSector !== 0xffffffff) {
+      var miniFatBytes = readChain(firstMiniFatSector, numMiniFatSectors * sectorSize);
+      var mfv = new DataView(miniFatBytes.buffer, miniFatBytes.byteOffset, miniFatBytes.byteLength);
+      for (var mf = 0; mf + 4 <= miniFatBytes.byteLength; mf += 4) miniFat.push(mfv.getUint32(mf, true));
+    }
+    var miniStream = root ? readChain(root.start, root.size) : new Uint8Array(0);
+
+    function readMiniChain(startSid, sizeLimit) {
+      var chunks = [];
+      var sid = startSid;
+      var guard = 0;
+      var total = 0;
+      while (sid !== 0xfffffffe && sid !== 0xffffffff && sid < miniFat.length && guard++ < miniFat.length + 1) {
+        var start = sid * miniSectorSize;
+        var chunk = miniStream.subarray(start, start + miniSectorSize);
+        chunks.push(chunk);
+        total += chunk.byteLength;
+        sid = miniFat[sid];
+      }
+      return concatChunks(chunks, total).subarray(0, sizeLimit);
+    }
+
+    return {
+      entries: entries,
+      readStream: function(entry) {
+        if (!entry || entry.type !== 2) return null;
+        if (entry.size < miniCutoff && miniFat.length && entry.start !== 0xfffffffe) {
+          return readMiniChain(entry.start, entry.size);
         }
+        return readChain(entry.start, entry.size);
       }
-
-      if (findings['Author'])              alerts.push({ type: 'warn', icon: '🪪', msg: 'Author name embedded: "' + findings['Author'] + '". Sharing this PDF exposes the creator\'s identity even if the document appears anonymous.' });
-      if (findings['Creator Application']) alerts.push({ type: 'warn', icon: '🔧', msg: 'Application version found: ' + findings['Creator Application'] + '. Software fingerprints can reveal unpatched vulnerabilities.' });
-      if (findings['Creation Date'])       alerts.push({ type: 'info', icon: '📅', msg: 'Timestamps present. These reveal when the document was created and last modified, leaking your work schedule.' });
-      if (Object.keys(findings).length === 0) {
-        alerts.push({ type: 'success', icon: '🛡', msg: 'No standard metadata detected in the PDF header. The file may have been sanitized, or metadata is stored in XMP format deeper in the file (use ExifTool for full coverage).' });
-      }
-
-      addLog('  Parsed PDF binary stream (' + fmtSize(file.size) + ').', 'dim');
-      addLog('  Found ' + Object.keys(findings).length + ' metadata fields.', 'val');
-      addLog('  Scan complete.', 'dim');
-      renderFindings(alerts, findings['Author'] ? 'med' : 'low', findings);
     };
-    reader.readAsArrayBuffer(file);
   }
 
-  /* ---- DOCX ---- */
-  function extractDOCX(file) {
-    var reader = new FileReader();
-    reader.onload = function(e) {
-      var bytes = new Uint8Array(e.target.result);
-      var str = '';
-      for (var i = 0; i < Math.min(bytes.length, 14000); i++) str += String.fromCharCode(bytes[i]);
+  function readCfbStreamByName(cfb, name) {
+    var exact = cfb.entries.filter(function(e) { return e.name === name; })[0];
+    var fallback = cfb.entries.filter(function(e) {
+      return e.name && e.name.toLowerCase().includes(name.replace(/^\u0005/, '').toLowerCase());
+    })[0];
+    return cfb.readStream(exact || fallback);
+  }
 
-      var findings = {};
-      var alerts = [];
-      var isZip = (bytes[0] === 0x50 && bytes[1] === 0x4B);
+  function parsePropertySet(bytes, kind) {
+    var out = {};
+    if (!bytes || bytes.length < 48) return out;
+    var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    var sections = view.getUint32(24, true);
+    var maps = {
+      SummaryInformation: {
+        2: 'Title', 3: 'Subject', 4: 'Author', 5: 'Keywords', 6: 'Comments',
+        7: 'Template', 8: 'Last Saved By', 9: 'Revision Number',
+        10: 'Total Editing Time', 11: 'Last Printed', 12: 'Created Time',
+        13: 'Last Saved Time', 14: 'Page Count', 15: 'Word Count',
+        16: 'Character Count', 18: 'Application Name', 19: 'Security'
+      },
+      DocumentSummaryInformation: {
+        2: 'Category', 3: 'Presentation Target', 4: 'Bytes', 5: 'Lines',
+        6: 'Paragraphs', 7: 'Slides', 8: 'Notes', 9: 'Hidden Slides',
+        10: 'Multimedia Clips', 11: 'Scale Crop', 14: 'Manager',
+        15: 'Company', 16: 'Links Up To Date', 19: 'Shared Document',
+        22: 'Hyperlinks Changed', 23: 'Application Version'
+      }
+    };
 
-      if (isZip) {
-        var xmlFields = [
-          { re: /<dc:creator>([^<]{1,120})<\/dc:creator>/i,              label: 'Author (dc:creator)' },
-          { re: /<cp:lastModifiedBy>([^<]{1,120})<\/cp:lastModifiedBy>/i, label: 'Last Modified By' },
-          { re: /<dc:title>([^<]{1,120})<\/dc:title>/i,                  label: 'Document Title' },
-          { re: /<dc:subject>([^<]{1,120})<\/dc:subject>/i,              label: 'Subject' },
-          { re: /<dc:description>([^<]{1,120})<\/dc:description>/i,      label: 'Description' },
-          { re: /<dcterms:created[^>]*>([^<]{1,80})<\/dcterms:created>/i, label: 'Created Date' },
-          { re: /<dcterms:modified[^>]*>([^<]{1,80})<\/dcterms:modified>/i, label: 'Modified Date' },
-          { re: /<cp:revision>([^<]{1,20})<\/cp:revision>/i,             label: 'Revision Count' },
-          { re: /<cp:keywords>([^<]{1,120})<\/cp:keywords>/i,            label: 'Keywords' },
-          { re: /<Application>([^<]{1,80})<\/Application>/i,             label: 'Authoring Application' },
-          { re: /<AppVersion>([^<]{1,20})<\/AppVersion>/i,               label: 'App Version' },
-        ];
-        xmlFields.forEach(function(f) {
-          var m = str.match(f.re);
-          if (m && m[1] && m[1].trim().length > 0) findings[f.label] = m[1].trim();
-        });
-
-        if (findings['Author (dc:creator)'])  alerts.push({ type: 'danger', icon: '🪪', msg: 'Author identity hardcoded: "' + findings['Author (dc:creator)'] + '". This name is embedded in every .docx you send, even if removed from the visible document text.' });
-        if (findings['Last Modified By'])      alerts.push({ type: 'warn', icon: '✏️', msg: 'Last editor\'s name found: "' + findings['Last Modified By'] + '". Reveals who touched the document most recently.' });
-        if (findings['Revision Count'])        alerts.push({ type: 'info', icon: '🔢', msg: 'This document has been saved ' + findings['Revision Count'] + ' time(s). Can hint at how many people edited it or how long it was worked on.' });
-        if (findings['Authoring Application']) alerts.push({ type: 'warn', icon: '🔧', msg: 'Office version fingerprint: ' + findings['Authoring Application'] + ' ' + (findings['App Version'] || '') + '.' });
-        if (Object.keys(findings).length === 0) {
-          alerts.push({ type: 'success', icon: '🛡', msg: 'No identity or application metadata detected. This document has likely been cleaned before sharing.' });
+    for (var s = 0; s < sections; s++) {
+      var sectionOffset = view.getUint32(44 + s * 20, true);
+      if (!sectionOffset || sectionOffset + 8 > bytes.length) continue;
+      var propCount = view.getUint32(sectionOffset + 4, true);
+      var entries = [];
+      var codepage = 1252;
+      for (var i = 0; i < propCount; i++) {
+        var pos = sectionOffset + 8 + i * 8;
+        var id = view.getUint32(pos, true);
+        var offset = view.getUint32(pos + 4, true);
+        entries.push({ id: id, offset: offset });
+      }
+      entries.forEach(function(entry) {
+        if (entry.id === 1) {
+          var cp = parseTypedProperty(view, sectionOffset + entry.offset, codepage);
+          var n = Number(cp);
+          if (Number.isFinite(n)) codepage = n;
         }
-      } else {
-        alerts.push({ type: 'info', icon: 'ℹ', msg: 'Older .doc (binary format) detected. Full parsing requires python-docx or LibreOffice on the command line.' });
+      });
+      entries.forEach(function(entry) {
+        if (entry.id === 1) return;
+        var label = (maps[kind] && maps[kind][entry.id]) || ('Property ' + entry.id);
+        var value = parseTypedProperty(view, sectionOffset + entry.offset, codepage);
+        addFinding(out, label, value);
+      });
+    }
+    return out;
+  }
+
+  function parseTypedProperty(view, pos, codepage) {
+    if (pos + 4 > view.byteLength) return '';
+    var type = view.getUint16(pos, true);
+    var valuePos = pos + 4;
+    if (type === 2) return view.getInt16(valuePos, true);
+    if (type === 3) return view.getInt32(valuePos, true);
+    if (type === 11) return view.getInt16(valuePos, true) !== 0 ? 'true' : 'false';
+    if (type === 19) return view.getUint32(valuePos, true);
+    if (type === 30) {
+      var len = view.getUint32(valuePos, true);
+      return decodeCodepage(viewBytes(view, valuePos + 4, Math.max(0, len - 1)), codepage).trim();
+    }
+    if (type === 31) {
+      var chars = view.getUint32(valuePos, true);
+      return decodeUtf16Le(viewBytes(view, valuePos + 4, Math.max(0, chars * 2 - 2))).trim();
+    }
+    if (type === 64) {
+      var low = view.getUint32(valuePos, true);
+      var high = view.getUint32(valuePos + 4, true);
+      var ms = (high * 4294967296 + low) / 10000 - 11644473600000;
+      if (Number.isFinite(ms) && ms > 0) return new Date(ms).toLocaleString();
+      return '';
+    }
+    if ((type & 0x1000) === 0x1000) return '[vector property]';
+    if (type === 0) return '';
+    return '[type ' + type + ']';
+  }
+
+  function decodeCodepage(bytes, codepage) {
+    var label = codepage === 65001 ? 'utf-8' : codepage === 1200 ? 'utf-16le' : 'windows-1252';
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch (e) {
+      return bytesToLatin1(bytes);
+    }
+  }
+
+  /* ---- Audio/video metadata ---- */
+  async function extractMedia(file) {
+    var findings = {};
+    var alerts = [];
+    var bytes = new Uint8Array(await file.arrayBuffer());
+    var parsed = false;
+
+    if (ascii(bytes, 0, 3) === 'ID3' || getExt(file) === 'mp3') {
+      parsed = parseId3(bytes, findings, alerts) || parsed;
+    }
+    if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WAVE') {
+      parsed = parseWav(bytes, findings) || parsed;
+    }
+    if (looksLikeMp4(bytes)) {
+      parsed = parseMp4(bytes, findings) || parsed;
+    }
+    if (ascii(bytes, 0, 4) === 'fLaC') {
+      parsed = parseFlac(bytes, findings) || parsed;
+    }
+    if (ascii(bytes, 0, 4) === 'OggS') {
+      parsed = parseOggVorbis(bytes, findings) || parsed;
+    }
+
+    if (!parsed) {
+      addAlert(alerts, 'info', 'ℹ', 'No supported media metadata container was detected. Supported browser parsers: ID3, RIFF/WAV INFO, MP4/M4A atoms, FLAC Vorbis comments, and Ogg Vorbis comments.');
+    } else {
+      addLog('  Parsed media tag/container metadata.', 'val');
+    }
+    makeEmptySuccess(alerts, findings, 'media');
+    return { findings: findings, alerts: alerts };
+  }
+
+  function parseId3(bytes, findings, alerts) {
+    var parsed = false;
+    if (ascii(bytes, 0, 3) === 'ID3' && bytes.length >= 10) {
+      parsed = true;
+      var version = bytes[3];
+      var tagSize = synchsafe(bytes, 6);
+      var end = Math.min(bytes.length, 10 + tagSize);
+      var pos = 10;
+      addFinding(findings, 'ID3: Version', '2.' + version + '.' + bytes[4]);
+
+      if (bytes[5] & 0x40) {
+        if (version === 3 && pos + 4 <= end) pos += 4 + u32be(bytes, pos);
+        if (version === 4 && pos + 4 <= end) pos += synchsafe(bytes, pos);
       }
 
-      var risk = findings['Author (dc:creator)'] ? 'high' : (alerts.length > 1 ? 'med' : 'low');
-      addLog('  Parsed OOXML ZIP archive.', 'dim');
-      addLog('  Found ' + Object.keys(findings).length + ' metadata fields.', 'val');
-      addLog('  Scan complete.', 'dim');
-      renderFindings(alerts, risk, findings);
-    };
-    reader.readAsArrayBuffer(file);
-  }
-
-  /* ---- Audio (MP3 / WAV) ---- */
-  function extractAudio(file) {
-    var reader = new FileReader();
-    reader.onload = function(e) {
-      var bytes = new Uint8Array(e.target.result);
-      var str = '';
-      for (var i = 0; i < Math.min(bytes.length, 6000); i++) str += String.fromCharCode(bytes[i]);
-
-      var findings = {};
-      var alerts = [];
-
-      if (str.substring(0, 3) === 'ID3') {
-        var id3Fields = [
-          { prefix: 'TIT2', label: 'Title' }, { prefix: 'TPE1', label: 'Artist' },
-          { prefix: 'TALB', label: 'Album' }, { prefix: 'TYER', label: 'Year' },
-          { prefix: 'TENC', label: 'Encoder Software' }, { prefix: 'TCON', label: 'Genre' },
-          { prefix: 'COMM', label: 'Comment' }, { prefix: 'TCOP', label: 'Copyright' },
-          { prefix: 'TOWN', label: 'File Owner' }, { prefix: 'WXXX', label: 'Embedded URL' },
-        ];
-        id3Fields.forEach(function(f) {
-          var idx = str.indexOf(f.prefix);
-          if (idx !== -1) {
-            var chunk = str.substring(idx + 10, idx + 70).replace(/[^\x20-\x7E]/g, '').trim();
-            if (chunk.length > 1) findings[f.label] = chunk;
-          }
-        });
-        if (findings['Encoder Software']) alerts.push({ type: 'warn', icon: '🔧', msg: 'Encoding software found: ' + findings['Encoder Software'] + '. Identifies the tool used to create the file.' });
-        if (findings['File Owner'])       alerts.push({ type: 'warn', icon: '🪪', msg: 'File owner embedded: "' + findings['File Owner'] + '".' });
-        if (findings['Embedded URL'])     alerts.push({ type: 'info', icon: '🔗', msg: 'A URL is embedded in this audio file: ' + findings['Embedded URL'] });
-      } else {
-        alerts.push({ type: 'info', icon: 'ℹ', msg: 'Non-ID3 audio detected. The browser can read full ID3 tags from MP3 files. WAV and other formats may require ExifTool for complete analysis.' });
+      while (pos + (version === 2 ? 6 : 10) <= end) {
+        var id = version === 2 ? ascii(bytes, pos, 3) : ascii(bytes, pos, 4);
+        if (!/^[A-Z0-9]{3,4}$/.test(id)) break;
+        var frameSize = version === 2 ? u24be(bytes, pos + 3) : version === 4 ? synchsafe(bytes, pos + 4) : u32be(bytes, pos + 4);
+        var header = version === 2 ? 6 : 10;
+        if (!frameSize || pos + header + frameSize > end) break;
+        var frame = bytes.subarray(pos + header, pos + header + frameSize);
+        var frameId = ID3_V22_FRAMES[id] || id;
+        parseId3Frame(frameId, frame, findings);
+        pos += header + frameSize;
       }
+    }
 
-      addLog('  Audio stream parsed.', 'dim');
-      addLog('  Found ' + Object.keys(findings).length + ' ID3 tag fields.', 'val');
-      addLog('  Scan complete.', 'dim');
-      renderFindings(alerts, Object.keys(findings).length > 2 ? 'med' : 'low', findings);
+    if (bytes.length >= 128 && ascii(bytes, bytes.length - 128, 3) === 'TAG') {
+      parsed = true;
+      var start = bytes.length - 125;
+      addFinding(findings, 'ID3v1: Title', bytesToLatin1(bytes.subarray(start, start + 30)).replace(/\0+$/, '').trim());
+      addFinding(findings, 'ID3v1: Artist', bytesToLatin1(bytes.subarray(start + 30, start + 60)).replace(/\0+$/, '').trim());
+      addFinding(findings, 'ID3v1: Album', bytesToLatin1(bytes.subarray(start + 60, start + 90)).replace(/\0+$/, '').trim());
+      addFinding(findings, 'ID3v1: Year', bytesToLatin1(bytes.subarray(start + 90, start + 94)).replace(/\0+$/, '').trim());
+      addFinding(findings, 'ID3v1: Comment', bytesToLatin1(bytes.subarray(start + 94, start + 124)).replace(/\0+$/, '').trim());
+      if (bytes[bytes.length - 3] === 0 && bytes[bytes.length - 2]) addFinding(findings, 'ID3v1: Track', bytes[bytes.length - 2]);
+    }
+
+    if (parsed && Object.keys(findings).length <= 1) {
+      addAlert(alerts, 'info', 'ℹ', 'An ID3 container was found, but no readable public frames were present.');
+    }
+    return parsed;
+  }
+
+  function parseId3Frame(id, frame, findings) {
+    if (!frame.length) return;
+    if (ID3_TEXT_FRAMES[id] || (id[0] === 'T' && id !== 'TXXX')) {
+      addFinding(findings, 'ID3: ' + (ID3_TEXT_FRAMES[id] || id), decodeId3TextFrame(frame));
+      return;
+    }
+    if (id === 'TXXX') {
+      var custom = decodeId3Pair(frame);
+      addFinding(findings, 'ID3 Custom: ' + (custom.description || 'Text'), custom.value);
+      return;
+    }
+    if (id === 'COMM' || id === 'USLT') {
+      var enc = frame[0];
+      var body = frame.subarray(4);
+      var split = splitEncodedText(body, enc);
+      addFinding(findings, id === 'COMM' ? 'ID3: Comment' : 'ID3: Lyrics', split.restText || split.firstText);
+      return;
+    }
+    if (id === 'WXXX') {
+      var pair = decodeId3Pair(frame);
+      addFinding(findings, 'ID3 URL: ' + (pair.description || 'URL'), pair.value);
+      return;
+    }
+    if (id[0] === 'W') {
+      addFinding(findings, 'ID3 URL: ' + id, bytesToLatin1(frame).replace(/\0+$/, '').trim());
+      return;
+    }
+    if (id === 'APIC') {
+      var pic = parseApic(frame);
+      addFinding(findings, 'ID3: Embedded Picture', pic);
+      return;
+    }
+    if (id === 'PRIV') {
+      var ownerEnd = indexOfByte(frame, 0, 0);
+      addFinding(findings, 'ID3: Private Frame Owner', bytesToLatin1(frame.subarray(0, ownerEnd >= 0 ? ownerEnd : frame.length)));
+      return;
+    }
+    if (id === 'UFID') {
+      var sep = indexOfByte(frame, 0, 0);
+      addFinding(findings, 'ID3: Unique File Identifier Owner', bytesToLatin1(frame.subarray(0, sep >= 0 ? sep : frame.length)));
+    }
+  }
+
+  function decodeId3TextFrame(frame) {
+    return decodeId3Text(frame.subarray(1), frame[0]).replace(/\0/g, ' / ').trim();
+  }
+
+  function decodeId3Pair(frame) {
+    var enc = frame[0];
+    var split = splitEncodedText(frame.subarray(1), enc);
+    return { description: split.firstText, value: split.restText };
+  }
+
+  function splitEncodedText(bytes, enc) {
+    var sep = encodedNullIndex(bytes, enc);
+    if (sep < 0) return { firstText: decodeId3Text(bytes, enc), restText: '' };
+    var nullSize = enc === 1 || enc === 2 ? 2 : 1;
+    return {
+      firstText: decodeId3Text(bytes.subarray(0, sep), enc),
+      restText: decodeId3Text(bytes.subarray(sep + nullSize), enc)
     };
-    reader.readAsArrayBuffer(file);
   }
 
-  /* ---- Helpers ---- */
-  function addLog(text, cls) {
-    var log = document.getElementById('log-output');
-    var d = document.createElement('div');
-    d.className = 'log-line';
-    d.innerHTML = '<span class="' + cls + '">' + esc(text) + '</span>';
-    log.appendChild(d);
+  function decodeId3Text(bytes, enc) {
+    try {
+      if (enc === 1) {
+        if (bytes[0] === 0xff && bytes[1] === 0xfe) return decodeUtf16Le(bytes.subarray(2));
+        if (bytes[0] === 0xfe && bytes[1] === 0xff) return decodeUtf16Be(bytes.subarray(2));
+        return decodeUtf16Le(bytes);
+      }
+      if (enc === 2) return decodeUtf16Be(bytes);
+      if (enc === 3) return new TextDecoder('utf-8').decode(bytes);
+      return new TextDecoder('iso-8859-1').decode(bytes);
+    } catch (e) {
+      return bytesToLatin1(bytes);
+    }
   }
 
+  function parseApic(frame) {
+    var enc = frame[0];
+    var mimeEnd = indexOfByte(frame, 1, 0);
+    if (mimeEnd < 0) return 'present (' + fmtSize(frame.length) + ')';
+    var mime = bytesToLatin1(frame.subarray(1, mimeEnd));
+    var picType = frame[mimeEnd + 1];
+    var descBytes = frame.subarray(mimeEnd + 2);
+    var descEnd = encodedNullIndex(descBytes, enc);
+    var imageStart = mimeEnd + 2 + (descEnd >= 0 ? descEnd + (enc === 1 || enc === 2 ? 2 : 1) : 0);
+    return mime + ', type ' + picType + ', ' + fmtSize(Math.max(0, frame.length - imageStart));
+  }
+
+  function parseWav(bytes, findings) {
+    var parsed = true;
+    addFinding(findings, 'WAV: Container', 'RIFF/WAVE');
+    var pos = 12;
+    var byteRate = null;
+    var dataSize = null;
+    while (pos + 8 <= bytes.length) {
+      var id = ascii(bytes, pos, 4);
+      var size = u32le(bytes, pos + 4);
+      var start = pos + 8;
+      var end = Math.min(start + size, bytes.length);
+      if (id === 'fmt ' && size >= 16) {
+        addFinding(findings, 'WAV: Audio Format', u16le(bytes, start));
+        addFinding(findings, 'WAV: Channels', u16le(bytes, start + 2));
+        addFinding(findings, 'WAV: Sample Rate', u32le(bytes, start + 4) + ' Hz');
+        byteRate = u32le(bytes, start + 8);
+        addFinding(findings, 'WAV: Byte Rate', byteRate + ' B/s');
+        addFinding(findings, 'WAV: Bits Per Sample', u16le(bytes, start + 14));
+      } else if (id === 'data') {
+        dataSize = size;
+        addFinding(findings, 'WAV: Audio Data Size', fmtSize(size));
+      } else if (id === 'LIST' && ascii(bytes, start, 4) === 'INFO') {
+        parseWavInfo(bytes.subarray(start + 4, end), findings);
+      } else if (id === 'bext') {
+        parseBroadcastWave(bytes.subarray(start, end), findings);
+      } else if (id === 'iXML') {
+        var ixml = bytesToUtf8(bytes.subarray(start, end));
+        addFinding(findings, 'WAV: iXML Present', 'yes');
+        var doc = parseXml(ixml);
+        if (doc) addFinding(findings, 'WAV iXML: Project', xmlTextByLocalName(doc, 'PROJECT'));
+      }
+      pos = end + (size % 2);
+    }
+    if (byteRate && dataSize) addFinding(findings, 'WAV: Duration', formatDuration(dataSize / byteRate));
+    return parsed;
+  }
+
+  function parseWavInfo(info, findings) {
+    var labels = {
+      INAM: 'Title', IART: 'Artist', ICRD: 'Creation Date', ISFT: 'Software',
+      ICMT: 'Comment', ICOP: 'Copyright', IGNR: 'Genre', IPRD: 'Product',
+      IENG: 'Engineer', ISBJ: 'Subject', ISRC: 'Source', ISRF: 'Source Form'
+    };
+    var pos = 0;
+    while (pos + 8 <= info.length) {
+      var id = ascii(info, pos, 4);
+      var size = u32le(info, pos + 4);
+      var start = pos + 8;
+      var end = Math.min(start + size, info.length);
+      addFinding(findings, 'WAV INFO: ' + (labels[id] || id), bytesToLatin1(info.subarray(start, end)).replace(/\0+$/, '').trim());
+      pos = end + (size % 2);
+    }
+  }
+
+  function parseBroadcastWave(bytes, findings) {
+    addFinding(findings, 'BWF: Description', bytesToLatin1(bytes.subarray(0, 256)).replace(/\0+$/, '').trim());
+    addFinding(findings, 'BWF: Originator', bytesToLatin1(bytes.subarray(256, 288)).replace(/\0+$/, '').trim());
+    addFinding(findings, 'BWF: Originator Reference', bytesToLatin1(bytes.subarray(288, 320)).replace(/\0+$/, '').trim());
+    addFinding(findings, 'BWF: Origination Date', bytesToLatin1(bytes.subarray(320, 330)).replace(/\0+$/, '').trim());
+    addFinding(findings, 'BWF: Origination Time', bytesToLatin1(bytes.subarray(330, 338)).replace(/\0+$/, '').trim());
+    addFinding(findings, 'BWF: Version', bytes.length >= 348 ? u16le(bytes, 346) : '');
+  }
+
+  function looksLikeMp4(bytes) {
+    return bytes.length >= 12 && ascii(bytes, 4, 4) === 'ftyp';
+  }
+
+  function parseMp4(bytes, findings) {
+    if (!looksLikeMp4(bytes)) return false;
+    walkMp4(bytes, 0, bytes.length, [], function(type, start, end, path) {
+      var parent = path[path.length - 1];
+      if (type === 'ftyp') {
+        addFinding(findings, 'MP4: Major Brand', ascii(bytes, start, 4));
+        addFinding(findings, 'MP4: Minor Version', u32be(bytes, start + 4));
+        var brands = [];
+        for (var p = start + 8; p + 4 <= end; p += 4) brands.push(ascii(bytes, p, 4));
+        addFinding(findings, 'MP4: Compatible Brands', brands.join(', '));
+      } else if (type === 'mvhd') {
+        parseMvhd(bytes, start, end, findings);
+      } else if (parent === 'ilst') {
+        parseMp4IlstItem(bytes, type, start, end, findings);
+      }
+    });
+    return true;
+  }
+
+  function walkMp4(bytes, start, end, path, callback, depth) {
+    depth = depth || 0;
+    if (depth > 12) return;
+    var containerTypes = ['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'udta', 'ilst'];
+    var pos = start;
+    while (pos + 8 <= end) {
+      var size = u32be(bytes, pos);
+      var type = ascii(bytes, pos + 4, 4);
+      var header = 8;
+      if (size === 1 && pos + 16 <= end) {
+        size = u64be(bytes, pos + 8);
+        header = 16;
+      } else if (size === 0) {
+        size = end - pos;
+      }
+      if (!size || size < header || pos + size > end) break;
+      var contentStart = pos + header;
+      var boxEnd = pos + size;
+      callback(type, contentStart, boxEnd, path);
+      var childStart = contentStart;
+      if (type === 'meta') childStart += 4;
+      if (containerTypes.includes(type) || type === 'meta') {
+        walkMp4(bytes, childStart, boxEnd, path.concat(type), callback, depth + 1);
+      }
+      pos = boxEnd;
+    }
+  }
+
+  function parseMvhd(bytes, start, end, findings) {
+    if (start + 20 > end) return;
+    var version = bytes[start];
+    if (version === 1 && start + 32 <= end) {
+      var created = u64be(bytes, start + 4);
+      var modified = u64be(bytes, start + 12);
+      var timescale = u32be(bytes, start + 20);
+      var duration = u64be(bytes, start + 24);
+      addFinding(findings, 'MP4: Created', mp4Time(created));
+      addFinding(findings, 'MP4: Modified', mp4Time(modified));
+      if (timescale) addFinding(findings, 'MP4: Duration', formatDuration(duration / timescale));
+    } else if (version === 0 && start + 20 <= end) {
+      var c = u32be(bytes, start + 4);
+      var m = u32be(bytes, start + 8);
+      var ts = u32be(bytes, start + 12);
+      var dur = u32be(bytes, start + 16);
+      addFinding(findings, 'MP4: Created', mp4Time(c));
+      addFinding(findings, 'MP4: Modified', mp4Time(m));
+      if (ts) addFinding(findings, 'MP4: Duration', formatDuration(dur / ts));
+    }
+  }
+
+  function mp4Time(seconds) {
+    if (!seconds) return '';
+    return new Date((seconds - 2082844800) * 1000).toLocaleString();
+  }
+
+  function parseMp4IlstItem(bytes, itemType, start, end, findings) {
+    var label = MP4_META_LABELS[itemType] || itemType;
+    var mean = '';
+    var name = '';
+    var values = [];
+    var pos = start;
+    while (pos + 8 <= end) {
+      var size = u32be(bytes, pos);
+      var type = ascii(bytes, pos + 4, 4);
+      if (!size || pos + size > end) break;
+      var content = pos + 8;
+      var boxEnd = pos + size;
+      if (type === 'mean') mean = bytesToUtf8(bytes.subarray(content + 4, boxEnd));
+      if (type === 'name') name = bytesToUtf8(bytes.subarray(content + 4, boxEnd));
+      if (type === 'data' && content + 8 <= boxEnd) {
+        var dataType = u32be(bytes, content);
+        var payload = bytes.subarray(content + 8, boxEnd);
+        values.push(decodeMp4Data(itemType, dataType, payload));
+      }
+      pos = boxEnd;
+    }
+    if (itemType === '----') label = 'Freeform: ' + [mean, name].filter(Boolean).join('/');
+    values.forEach(function(v) { addFinding(findings, 'MP4: ' + label, v); });
+  }
+
+  function decodeMp4Data(itemType, dataType, payload) {
+    if (itemType === 'trkn' || itemType === 'disk') {
+      if (payload.length >= 6) return u16be(payload, 2) + '/' + u16be(payload, 4);
+    }
+    if (itemType === 'covr') {
+      var kind = dataType === 13 ? 'JPEG' : dataType === 14 ? 'PNG' : 'image';
+      return kind + ', ' + fmtSize(payload.length);
+    }
+    if (itemType === 'tmpo' || itemType === 'cpil') {
+      if (payload.length === 1) return payload[0];
+      if (payload.length >= 2) return u16be(payload, payload.length - 2);
+    }
+    if (dataType === 1 || dataType === 0) return bytesToUtf8(payload).replace(/\0+$/, '').trim();
+    if (dataType === 21 && payload.length <= 4) {
+      var n = 0;
+      for (var i = 0; i < payload.length; i++) n = (n << 8) + payload[i];
+      return n;
+    }
+    return bytesToUtf8(payload).replace(/\0+$/, '').trim() || ('binary, ' + fmtSize(payload.length));
+  }
+
+  function parseFlac(bytes, findings) {
+    addFinding(findings, 'FLAC: Container', 'FLAC');
+    var pos = 4;
+    var last = false;
+    while (!last && pos + 4 <= bytes.length) {
+      var header = bytes[pos++];
+      last = !!(header & 0x80);
+      var type = header & 0x7f;
+      var len = u24be(bytes, pos);
+      pos += 3;
+      var end = Math.min(pos + len, bytes.length);
+      if (type === 0 && len >= 34) {
+        var sampleRate = (bytes[pos + 10] << 12) | (bytes[pos + 11] << 4) | (bytes[pos + 12] >> 4);
+        var channels = ((bytes[pos + 12] & 0x0e) >> 1) + 1;
+        var bits = (((bytes[pos + 12] & 1) << 4) | (bytes[pos + 13] >> 4)) + 1;
+        var total = (bytes[pos + 13] & 0x0f) * 4294967296 + u32be(bytes, pos + 14);
+        addFinding(findings, 'FLAC: Sample Rate', sampleRate + ' Hz');
+        addFinding(findings, 'FLAC: Channels', channels);
+        addFinding(findings, 'FLAC: Bits Per Sample', bits);
+        if (sampleRate && total) addFinding(findings, 'FLAC: Duration', formatDuration(total / sampleRate));
+      }
+      if (type === 4) parseVorbisComment(bytes.subarray(pos, end), findings, 'FLAC');
+      if (type === 6) addFinding(findings, 'FLAC: Embedded Picture', fmtSize(len));
+      pos = end;
+    }
+    return true;
+  }
+
+  function parseOggVorbis(bytes, findings) {
+    var needle = [3, 118, 111, 114, 98, 105, 115];
+    var idx = findBytes(bytes, needle);
+    if (idx < 0) return false;
+    addFinding(findings, 'Ogg: Codec', 'Vorbis');
+    parseVorbisComment(bytes.subarray(idx + needle.length), findings, 'Ogg Vorbis');
+    return true;
+  }
+
+  function parseVorbisComment(bytes, findings, prefix) {
+    if (bytes.length < 8) return;
+    var view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    var pos = 0;
+    var vendorLen = view.getUint32(pos, true);
+    pos += 4;
+    if (pos + vendorLen + 4 > bytes.length) return;
+    addFinding(findings, prefix + ': Vendor', bytesToUtf8(bytes.subarray(pos, pos + vendorLen)));
+    pos += vendorLen;
+    var count = view.getUint32(pos, true);
+    pos += 4;
+    for (var i = 0; i < count && pos + 4 <= bytes.length; i++) {
+      var len = view.getUint32(pos, true);
+      pos += 4;
+      if (pos + len > bytes.length) break;
+      var text = bytesToUtf8(bytes.subarray(pos, pos + len));
+      pos += len;
+      var eq = text.indexOf('=');
+      if (eq > 0) addFinding(findings, prefix + ': ' + text.slice(0, eq), text.slice(eq + 1));
+    }
+  }
+
+  /* ---- Rendering / export ---- */
   function renderFindings(alerts, risk, findings, gps) {
-    if (findings) Object.assign(globalFindings, findings);
+    globalFindings = {};
+    Object.assign(globalFindings, findings || {});
+    globalAlerts = alerts || [];
+    globalRisk = risk || 'low';
 
-    // Risk badge
     var rw = document.getElementById('risk-wrap');
     var riskLabel = risk === 'high' ? '● High exposure' : risk === 'med' ? '◆ Medium exposure' : '✓ Low exposure';
-    var riskClass = 'risk-' + risk;
-    rw.innerHTML = '<span class="risk-badge ' + riskClass + '">' + riskLabel + '</span>';
+    rw.innerHTML = '<span class="risk-badge risk-' + risk + '">' + riskLabel + '</span>';
 
-    // Alerts
     var az = document.getElementById('alerts-zone');
     az.innerHTML = '';
     (alerts || []).forEach(function(a) {
       var d = document.createElement('div');
       d.className = 'alert-box alert-' + a.type;
-      d.innerHTML = '<span class="alert-icon">' + a.icon + '</span><span>' + esc(a.msg) + '</span>';
+      d.innerHTML = '<span class="alert-icon">' + esc(a.icon) + '</span><span>' + esc(a.msg) + '</span>';
       az.appendChild(d);
     });
 
-    // Findings
     var fz = document.getElementById('findings-zone');
     fz.innerHTML = '';
 
-    // GPS map link
-    if (gps && gps.lat !== null) {
+    if (gps && gps.lat !== null && gps.lon !== null) {
       var locLabel = document.createElement('div');
       locLabel.className = 'section-label';
       locLabel.textContent = 'Location data';
       fz.appendChild(locLabel);
       var mapLink = document.createElement('a');
       mapLink.id = 'map-link';
-      mapLink.href = 'https://maps.google.com/?q=' + gps.lat + ',' + gps.lon;
+      mapLink.href = 'https://maps.google.com/?q=' + encodeURIComponent(gps.lat + ',' + gps.lon);
       mapLink.target = '_blank';
       mapLink.rel = 'noopener';
       mapLink.innerHTML = '<span style="font-size:22px">🗺</span><div><div style="font-family:var(--sans);font-weight:600;font-size:13px">Open location in Google Maps</div><div class="gps-coords">' + gps.lat.toFixed(6) + ', ' + gps.lon.toFixed(6) + '</div></div><span class="map-arrow">↗</span>';
       fz.appendChild(mapLink);
     }
 
-    // Tag grid
     if (findings && Object.keys(findings).length > 0) {
       var ml = document.createElement('div');
       ml.className = 'section-label';
@@ -867,12 +1958,12 @@
 
       var grid = document.createElement('div');
       grid.className = 'tag-grid';
-      var sensitive = ['gps', 'author', 'creator', 'owner', 'artist', 'copyright', 'modified by'];
       Object.keys(findings).forEach(function(k) {
-        var isS = sensitive.some(function(s) { return k.toLowerCase().includes(s); });
+        var lk = k.toLowerCase();
+        var isSensitive = SENSITIVE_KEYS.some(function(s) { return lk.includes(s); });
         var card = document.createElement('div');
         card.className = 'tag-card';
-        card.innerHTML = '<div class="tag-key">' + esc(k) + '</div><div class="tag-val' + (isS ? ' highlight' : '') + '">' + esc(findings[k]) + '</div>';
+        card.innerHTML = '<div class="tag-key">' + esc(k) + '</div><div class="tag-val' + (isSensitive ? ' highlight' : '') + '">' + esc(findings[k]) + '</div>';
         grid.appendChild(card);
       });
       fz.appendChild(grid);
@@ -891,29 +1982,158 @@
       '================================================',
       'File     : ' + (globalFile ? globalFile.name : 'unknown'),
       'Scanned  : ' + new Date().toLocaleString(),
+      'Risk     : ' + globalRisk,
       'Tool     : Metadata Forensics Tool (browser-based)',
       '',
-      '--- METADATA FIELDS ---',
+      '--- ALERTS ---'
     ];
+    if (globalAlerts.length) {
+      globalAlerts.forEach(function(a) { lines.push('[' + a.type.toUpperCase() + '] ' + a.msg); });
+    } else {
+      lines.push('None');
+    }
+    lines.push('');
+    lines.push('--- METADATA FIELDS ---');
     Object.keys(globalFindings).forEach(function(k) {
-      lines.push(k.padEnd(28) + ': ' + globalFindings[k]);
+      lines.push(k.padEnd(36) + ': ' + globalFindings[k]);
     });
     lines.push('');
     lines.push('================================================');
-    lines.push('Files never leave your device — all analysis runs locally.');
+    lines.push('Files stay on this device; parser libraries load from CDN.');
     var blob = new Blob([lines.join('\n')], { type: 'text/plain' });
     var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    var url = URL.createObjectURL(blob);
+    a.href = url;
     a.download = 'metareport_' + (globalFile ? globalFile.name.replace(/\.[^/.]+$/, '') : 'unknown') + '.txt';
     a.click();
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
   }
 
   function resetTool() {
+    scanToken++;
+    if (currentThumbUrl) {
+      URL.revokeObjectURL(currentThumbUrl);
+      currentThumbUrl = null;
+    }
     document.getElementById('drop-zone').style.display = 'block';
     document.getElementById('results').style.display = 'none';
     document.getElementById('file-input').value = '';
     globalFindings = {};
+    globalAlerts = [];
+    globalRisk = 'low';
     globalFile = null;
+  }
+
+  /* ---- Binary helpers ---- */
+  function mapObjectIntoFindings(obj, findings, prefix) {
+    Object.keys(obj || {}).forEach(function(k) {
+      addFinding(findings, prefix + ': ' + k, obj[k]);
+    });
+  }
+
+  function concatChunks(chunks, total) {
+    var out = new Uint8Array(total);
+    var offset = 0;
+    chunks.forEach(function(chunk) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    });
+    return out;
+  }
+
+  function viewBytes(view, start, length) {
+    if (start >= view.byteLength || length <= 0) return new Uint8Array(0);
+    return new Uint8Array(view.buffer, view.byteOffset + start, Math.max(0, Math.min(length, view.byteLength - start)));
+  }
+
+  function ascii(bytes, start, len) {
+    if (start < 0 || start + len > bytes.length) return '';
+    var s = '';
+    for (var i = 0; i < len; i++) s += String.fromCharCode(bytes[start + i]);
+    return s;
+  }
+
+  function bytesToLatin1(bytes) {
+    try {
+      return new TextDecoder('iso-8859-1').decode(bytes);
+    } catch (e) {
+      var s = '';
+      for (var i = 0; i < bytes.length; i += 8192) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+      }
+      return s;
+    }
+  }
+
+  function bytesToUtf8(bytes) {
+    try {
+      return new TextDecoder('utf-8').decode(bytes);
+    } catch (e) {
+      return bytesToLatin1(bytes);
+    }
+  }
+
+  function decodeUtf16Le(bytes) {
+    var s = '';
+    for (var i = 0; i + 1 < bytes.length; i += 2) {
+      var code = bytes[i] | (bytes[i + 1] << 8);
+      if (code === 0) continue;
+      s += String.fromCharCode(code);
+    }
+    return s;
+  }
+
+  function decodeUtf16Be(bytes) {
+    var s = '';
+    for (var i = 0; i + 1 < bytes.length; i += 2) {
+      var code = (bytes[i] << 8) | bytes[i + 1];
+      if (code === 0) continue;
+      s += String.fromCharCode(code);
+    }
+    return s;
+  }
+
+  function u16le(b, p) { return b[p] | (b[p + 1] << 8); }
+  function u16be(b, p) { return (b[p] << 8) | b[p + 1]; }
+  function u24be(b, p) { return (b[p] << 16) | (b[p + 1] << 8) | b[p + 2]; }
+  function u32le(b, p) { return (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0; }
+  function u32be(b, p) { return ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0; }
+  function u64be(b, p) { return u32be(b, p) * 4294967296 + u32be(b, p + 4); }
+  function synchsafe(b, p) { return (b[p] << 21) | (b[p + 1] << 14) | (b[p + 2] << 7) | b[p + 3]; }
+
+  function indexOfByte(bytes, start, value) {
+    for (var i = start; i < bytes.length; i++) if (bytes[i] === value) return i;
+    return -1;
+  }
+
+  function encodedNullIndex(bytes, enc) {
+    if (enc === 1 || enc === 2) {
+      for (var i = 0; i + 1 < bytes.length; i += 2) {
+        if (bytes[i] === 0 && bytes[i + 1] === 0) return i;
+      }
+      return -1;
+    }
+    return indexOfByte(bytes, 0, 0);
+  }
+
+  function findBytes(bytes, needle) {
+    outer:
+    for (var i = 0; i <= bytes.length - needle.length; i++) {
+      for (var j = 0; j < needle.length; j++) {
+        if (bytes[i + j] !== needle[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds)) return '';
+    var total = Math.round(seconds);
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var s = total % 60;
+    return h ? h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') : m + ':' + String(s).padStart(2, '0');
   }
 </script>
 </body>
