@@ -19,7 +19,7 @@ Every file you create or photograph carries invisible "metadata" baked in by you
 
 ---
 
-## Why this matters (the security angle)
+## Why this matters
 
 This is a real-world OSINT (Open Source Intelligence) and digital forensics technique:
 
@@ -89,27 +89,6 @@ MP3 files begin with an `ID3` header containing tag frames (TIT2 = title, TPE1 =
 | Old .doc binary format | `python-docx` or LibreOffice |
 | XMP metadata in PDFs | `exiftool -xmp filename.pdf` |
 | Deep forensic analysis | [Autopsy](https://www.autopsy.com), [ExifTool](https://exiftool.org) |
-
----
-
-## Skills you'll learn from this project
-
-- **Digital forensics** — understanding how metadata is embedded in file formats
-- **OSINT** — how investigators extract identity data from files
-- **JavaScript file APIs** — `FileReader`, `ArrayBuffer`, `Uint8Array`
-- **Binary file parsing** — reading raw bytes and interpreting structured data
-- **Security awareness** — what data you're leaking when sharing files
-
----
-
-## Ideas to extend this project
-
-- [ ] Add drag-and-drop support for multiple files (batch analysis)
-- [ ] Add a "strip metadata" button that outputs a cleaned copy using Canvas API (for images)
-- [ ] Add a scoring system / risk meter
-- [ ] Add PNG chunk parsing using a JavaScript ZIP library
-- [ ] Export report as JSON for piping into other tools
-- [ ] Add comparison view (before/after metadata stripping)
 
 ---
 
