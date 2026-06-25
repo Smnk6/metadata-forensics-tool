@@ -12,18 +12,17 @@ Every file you create or photograph carries invisible "metadata" baked in by you
 
 | File Type | What it reveals |
 | --- | --- |
-| 📸 **JPEG / TIFF / PNG** | GPS coordinates, camera make/model, software version, timestamps, EXIF/XMP/IPTC data
+| 📸 **JPEG / TIFF / PNG** | GPS coordinates, camera make/model, software version, timestamps, EXIF/XMP/IPTC data |
 
- |
-| 📕 **PDF** | Author name, creating application, creation/modification dates, keywords, embedded attachments
+ 
+| 📕 **PDF** | Author name, creating application, creation/modification dates, keywords, embedded attachments |
 
- |
-| 📘 **DOCX / DOC (Word)** | Author name, last editor, revision count, track changes, comment authors, editing history
+ 
+| 📘 **DOCX / DOC (Word)** | Author name, last editor, revision count, track changes, comment authors, editing history |
 
- |
-| 🎵 **MP3 / WAV / MP4 / FLAC** | Artist, encoder software, file owner, duration, sample rates, recording dates, embedded pictures
+ 
+| 🎵 **MP3 / WAV / MP4 / FLAC** | Artist, encoder software, file owner, duration, sample rates, recording dates, embedded pictures |
 
- |
 
 ---
 
