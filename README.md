@@ -111,12 +111,8 @@ A custom vanilla JS binary parser reads file `ArrayBuffers` to extract ID3v1/ID3
 
 | Limitation | Better tool |
 | --- | --- |
-| Deep memory analysis of multi-gigabyte files | CLI tools (browser memory limits)
-
- |
-| Offline execution (requires internet for CDNs) | Standard local npm installations
-
- |
+| Deep memory analysis of multi-gigabyte files | CLI tools (browser memory limits) |
+| Offline execution (requires internet for CDNs) | Standard local npm installations |
 | Deep forensic system analysis | [Autopsy](https://www.google.com/search?q=https%3A%2F%2Fwww.autopsy.com), [ExifTool](https://exiftool.org)<br> |
 
 ---
