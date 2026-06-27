@@ -11,12 +11,11 @@ A browser-based digital forensics tool that extracts hidden metadata from files 
 Every file you create or photograph carries invisible "metadata" baked in by your device or software. This tool exposes it:
 
 | File Type | What it reveals |
-| --- | --- |
-| 📸 **JPEG / TIFF / PNG** | GPS coordinates, camera make/model, software version, timestamps, EXIF/XMP/IPTC data |
-| 📕 **PDF** | Author name, creating application, creation/modification dates, keywords, embedded attachments |
-| 📘 **DOCX / DOC (Word)** | Author name, last editor, revision count, track changes, comment authors, editing history |
-| 🎵 **MP3 / WAV / MP4 / FLAC** | Artist, encoder software, file owner, duration, sample rates, recording dates, embedded pictures |
-
+|-----------|----------------|
+| 📸 **JPEG / TIFF / PNG** | GPS coordinates, camera make/model, software version, timestamps, ISO/aperture, ICC profile, XMP/IPTC fields |
+| 📕 **PDF** | Author name, creating application, producer, creation/modification dates, keywords, page count, XMP metadata |
+| 📘 **DOCX / DOC (Word)** | Author name, last editor, revision count, Office version, timestamps, tracked changes, comment authors |
+| 🎵 **MP3 / M4A / WAV / FLAC / OGG** | Artist, encoder software, file owner, embedded URLs, recording date, duration, sample rate |
 
 ---
 
@@ -24,54 +23,34 @@ Every file you create or photograph carries invisible "metadata" baked in by you
 
 This is a real-world OSINT (Open Source Intelligence) and digital forensics technique:
 
-* **GPS in photos** → a journalist publishes a photo with location data embedded → their home address is now public.
+- **GPS in photos** → a journalist publishes a photo with location data embedded → their home address is now public
+- **Author in PDFs** → a company leaks a confidential document → the metadata reveals the employee who wrote it
+- **Software version in DOCX** → an attacker cross-references the Office version with known CVEs → finds an exploit path
+- **Device fingerprinting** → multiple "anonymous" photos are linked back to the same camera/phone
 
-
-* **Author in PDFs** → a company leaks a confidential document → the metadata reveals the employee who wrote it.
-
-
-* **Editing history in DOCX** → an attacker reviews tracked changes and comments → finds sensitive internal discussions and author identities.
-
-
-* **Device fingerprinting** → multiple "anonymous" photos are linked back to the same camera/phone.
-
-
-
-Real tools like [ExifTool](https://exiftool.org) do this at a deeper level — this project gives you the same concepts in a single HTML file you can understand line by line.
+Real tools like [ExifTool](https://exiftool.org) and `python-docx` do this at a deeper level — this project gives you the same concepts in a single HTML file you can understand line by line.
 
 ---
 
 ## How to run it
 
 **Option 1 — Just open the file**
-
 ```
 Download index.html → double-click it → opens in your browser
-
 ```
 
 **Option 2 — Serve it locally (recommended)**
-
 ```bash
 # Python 3
 python3 -m http.server 8000
 # then open http://localhost:8000
-
 ```
 
 **Option 3 — Deploy to GitHub Pages (free, shareable)**
-
 1. Fork this repo
-
-
 2. Go to Settings → Pages
-
-
 3. Set source to `main` branch, root folder
-
-
-4. Your tool is now live at `[https://yourusername.github.io/metadata-forensics-tool](https://yourusername.github.io/metadata-forensics-tool)`
-
+4. Your tool is now live at `https://yourusername.github.io/metadata-forensics-tool`
 
 ---
 
@@ -79,41 +58,57 @@ python3 -m http.server 8000
 
 ```
 metadata-forensics-tool/
-└── index.html      ← The entire tool. One file.
-
+└── index.html      ← The entire tool. One file. ~2,100 lines.
 ```
 
-Everything is vanilla JavaScript, HTML, and CSS — no frameworks, no build step, no npm. Complex parser libraries are loaded dynamically via CDN.
+Everything is vanilla JavaScript — no frameworks, no build step, no npm.
 
 ---
 
 ## How it works (technical breakdown)
 
-### JPEG/TIFF/PNG — ExifReader engine
+### JPEG / TIFF / PNG — EXIF, XMP, IPTC extraction
+Uses the [ExifReader](https://github.com/mattiasw/ExifReader) library (`exifreader@4.41.0`) to parse all major image metadata blocks: EXIF IFD (camera settings, GPS), XMP (Adobe-style extensible metadata), IPTC (press/editorial tags), and ICC profile data. GPS coordinates are decoded from rational values and rendered as a direct Google Maps link.
 
-Uses the `ExifReader` library via CDN to read the EXIF, XMP, and IPTC blocks embedded in image files. It automatically extracts tags and calculates GPS rational coordinates into decimal values.
+### PDF — PDF.js document catalog + binary fallback
+Uses [PDF.js](https://mozilla.github.io/pdf.js/) (`pdfjs-dist@6.0.227`) as the primary parser to read the document catalog, info dictionary (`Author`, `Creator`, `Producer`, `CreationDate`, etc.), and XMP metadata streams. A secondary raw binary scanner runs as a fallback, searching the file's byte stream for PDF name-value pairs and extracting any embedded XMP packet using regex against the raw content.
 
-### PDF — PDF.js Document engine
+### DOCX — OOXML ZIP parsing
+DOCX files are ZIP archives containing XML. The tool uses [JSZip](https://stuk.github.io/jszip/) (`jszip@3.10.1`) to decompress the archive and reads `docProps/core.xml` (author, last editor, revision, timestamps), `docProps/app.xml` (Office version, company, word/page counts), and `docProps/custom.xml` (any user-defined properties). It also scans `word/document.xml` and `word/comments.xml` for tracked changes and comment authors.
 
-Loads the official `pdf.js` library via CDN to parse the document catalog, info blocks, and metadata streams. It features a custom fallback parser that scans raw file bytes for standard PDF info dictionary keys (`/Author`, `/Creator`, `/CreationDate`) and XMP packets if the main engine fails.
+### DOC (legacy) — OLE Compound File Binary (CFB) parser
+Old `.doc` files use Microsoft's proprietary OLE CFB container format. The tool includes a pure-JavaScript CFB parser that reads the file allocation table, walks the directory entries, and extracts the `SummaryInformation` and `DocumentSummaryInformation` property streams to surface author, title, revision, and editing time metadata.
 
-### DOCX / DOC — OOXML and Legacy CFB parsing
-
-Modern DOCX files are parsed using the `JSZip` CDN library to decompress the archive and read `docProps/core.xml`, `app.xml`, and `custom.xml`. The tool also scans review data for tracked changes and comment authors. Legacy `.doc` files are handled by a custom-built OLE Compound File (CFB) property-set parser reading binary streams.
-
-### Media — Binary Audio/Video tag engine
-
-A custom vanilla JS binary parser reads file `ArrayBuffers` to extract ID3v1/ID3v2 tags from MP3s, RIFF/INFO/BWF chunks from WAVs, QuickTime atoms (`moov`, `trak`, `udta`) from MP4/M4As, and Vorbis comments from FLAC/OGG files.
+### Audio — Multi-format tag extraction
+Supports five audio containers in the browser, all parsed from raw bytes:
+- **MP3** — ID3v2 (v2.2 and v2.3) frame parser + ID3v1 trailer scan
+- **M4A / MP4** — ISO Base Media File Format atom walker (`ftyp`, `mvhd`, `ilst` tags)
+- **WAV** — RIFF chunk reader (fmt, LIST/INFO, Broadcast Wave Extension)
+- **FLAC** — Metadata block parser including Vorbis comment fields
+- **OGG** — Ogg page reader targeting the Vorbis comment header
 
 ---
 
 ## Limitations
 
 | Limitation | Better tool |
-| --- | --- |
-| Deep memory analysis of multi-gigabyte files | CLI tools (browser memory limits) |
-| Offline execution (requires internet for CDNs) | Standard local npm installations |
-| Deep forensic system analysis | [Autopsy](https://www.google.com/search?q=https%3A%2F%2Fwww.autopsy.com), [ExifTool](https://exiftool.org)<br> |
+|------------|-------------|
+| HEIC / AVIF / JXL images | `exiftool filename.heic` |
+| XMP metadata in standalone XMP files | `exiftool -xmp filename.xmp` |
+| PNG animated (APNG) metadata | `exiftool filename.apng` |
+| Deep forensic analysis | [Autopsy](https://www.autopsy.com), [ExifTool](https://exiftool.org) |
+| Batch / multi-file processing | `exiftool -r ./folder` |
+
+---
+
+## Skills learnt from this project
+
+- **Digital forensics** — understanding how metadata is embedded in file formats
+- **OSINT** — how investigators extract identity data from files
+- **JavaScript File APIs** — `FileReader`, `ArrayBuffer`, `Uint8Array`
+- **Binary file parsing** — reading raw bytes and interpreting structured data
+- **Security awareness** — what data you're leaking when sharing files
+- **Frontend development** — building a browser-based security tool in vanilla JavaScript
 
 ---
 
